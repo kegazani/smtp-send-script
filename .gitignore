@@ -1,0 +1,7 @@
+/dist/
+/.local/
+/.cache/
+*.env
+.env
+*.log
+*.test
