@@ -6,6 +6,16 @@
 
 Сборки находятся в `dist/`: Windows x64 / ARM64, macOS Apple Silicon / Intel, Linux x64. Распакуйте архив целиком.
 
+| Система | Скачать приложение |
+| --- | --- |
+| Windows x64 | [MailDesk-Windows-x64.zip](https://github.com/kegazani/smtp-send-script/raw/refs/heads/main/dist/MailDesk-Windows-x64.zip) |
+| Windows ARM64 | [MailDesk-Windows-ARM64.zip](https://github.com/kegazani/smtp-send-script/raw/refs/heads/main/dist/MailDesk-Windows-ARM64.zip) |
+| macOS Apple Silicon (M1 и новее) | [MailDesk-macOS-AppleSilicon.zip](https://github.com/kegazani/smtp-send-script/raw/refs/heads/main/dist/MailDesk-macOS-AppleSilicon.zip) |
+| macOS Intel | [MailDesk-macOS-Intel.zip](https://github.com/kegazani/smtp-send-script/raw/refs/heads/main/dist/MailDesk-macOS-Intel.zip) |
+| Linux x64 | [MailDesk-Linux-x64.zip](https://github.com/kegazani/smtp-send-script/raw/refs/heads/main/dist/MailDesk-Linux-x64.zip) |
+
+Контрольные суммы: [SHA256SUMS.txt](dist/SHA256SUMS.txt). После запуска откройте **Подключения** и сохраните SMTP-пароль и ключ DeepSeek. Если у вас уже есть личный файл `maildesk.env`, оставьте его рядом с приложением перед первым запуском.
+
 - **Windows:** запустите `MailDesk.exe`. Окно приложения оставьте открытым.
 - **macOS:** запустите `MailDesk.app`. При первом открытии неподписанного приложения macOS может потребовать разрешить его запуск в «Системные настройки → Конфиденциальность и безопасность». Альтернатива в архиве — `Запустить MailDesk.command`.
 - **Linux:** запустите `./maildesk`.

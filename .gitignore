@@ -1,4 +1,6 @@
-/dist/
+/dist/*
+!/dist/MailDesk-*.zip
+!/dist/SHA256SUMS.txt
 /.local/
 /.cache/
 *.env
