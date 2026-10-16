@@ -27,7 +27,7 @@ def build(target):
         info={'CFBundleExecutable':'MailDesk','CFBundleIdentifier':'local.maildesk.web','CFBundleName':'MailDesk','CFBundleDisplayName':'MailDesk','CFBundleShortVersionString':'1.1.1','CFBundleVersion':'4','CFBundleInfoDictionaryVersion':'6.0','CFBundlePackageType':'APPL','LSMinimumSystemVersion':'12.0','LSUIElement':True}
         (contents/'Info.plist').write_bytes(plistlib.dumps(info))
         launcher=folder/'Запустить MailDesk.command'
-        launcher.write_text('#!/bin/sh\ncd "$(dirname "$0")"\nexec ./MailDesk.app/Contents/MacOS/MailDesk\n')
+        shutil.copyfile(ROOT/'scripts/macos_web_launch.command',launcher)
         launcher.chmod(0o755)
         package_files.extend([contents/'Info.plist',launcher])
     else:

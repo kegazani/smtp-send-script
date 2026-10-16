@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import plistlib
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -53,59 +54,95 @@ def seal_archive(archive):
         shutil.copyfile(output, archive)
 
 
+def check_server(command, profile, env, client):
+    instance = origin = headers = None
+    log_path = profile.parent / (profile.name + '.log')
+    with log_path.open('w') as log:
+        process = subprocess.Popen(command + ['--no-browser', '--port', '0',
+            '--data-dir', str(profile), '--test-recipient', 'ddkritsin@gmail.com'],
+            env=env, stdin=subprocess.PIPE, stdout=log, stderr=log, start_new_session=True)
+        # Accept the scoped first-launch prompt in this disposable CI fixture.
+        process.stdin.write(b'\n')
+        process.stdin.close()
+        try:
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                if process.poll() is not None:
+                    raise RuntimeError(f'Web app exited before becoming ready ({process.returncode})')
+                try:
+                    instance = json.loads((profile / 'instance.json').read_text())
+                    origin = f'http://127.0.0.1:{instance["port"]}'
+                    headers = {'Cookie': 'maildesk=' + instance['session'], 'Origin': origin}
+                    request = urllib.request.Request(origin + '/api/state', headers=headers)
+                    state = json.load(client.open(request, timeout=2))
+                    assert state['project']['leads'] == []
+                    assert state['testRecipient'] == 'ddkritsin@gmail.com'
+                    break
+                except (OSError, ValueError):
+                    time.sleep(0.2)
+            else:
+                raise RuntimeError('Web app did not serve an authenticated state request')
+        except Exception:
+            log.flush()
+            print(log_path.read_text(), flush=True)
+            raise
+        finally:
+            if instance and origin and headers:
+                request = urllib.request.Request(origin + '/api/quit', data=b'{}',
+                    headers={**headers, 'Content-Type': 'application/json'}, method='POST')
+                try:
+                    client.open(request, timeout=3).close()
+                except OSError:
+                    pass
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGTERM)
+                process.wait(timeout=5)
+
+
 def smoke(archive):
     if sys.platform != 'darwin':
         raise RuntimeError('Run this launch check on macOS')
     with tempfile.TemporaryDirectory(prefix='maildesk-web-launch-') as tmp:
-        folder = Path(tmp)
+        # Spaces exercise Terminal drag-and-drop quoting as well.
+        folder = Path(tmp) / 'Downloaded MailDesk'
+        folder.mkdir()
         subprocess.run(['ditto', '-x', '-k', str(archive), str(folder)], check=True)
         app = folder / archive.stem / 'MailDesk.app'
+        launcher = app.parent / 'Запустить MailDesk.command'
+        binary = app / 'Contents/MacOS/MailDesk'
         subprocess.run(['codesign', '--verify', '--deep', '--strict', '--verbose=2', str(app)], check=True)
-        assert os.access(app / 'Contents/MacOS/MailDesk', os.X_OK)
-        profile = folder / 'fixture-profile'
+        assert os.access(binary, os.X_OK)
         env = os.environ.copy()
         for key in ['SMTP_USERNAME', 'SMTP_PASSWORD', 'SMTP_FROM_EMAIL', 'LLM_API_KEY']:
             env.pop(key, None)
         client = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-        instance = None
-        origin = None
-        headers = None
-        with (folder / 'launch.log').open('w') as log:
-            process = subprocess.Popen(['open', '-n', '-W', str(app), '--args',
-                '--no-browser', '--port', '0', '--data-dir', str(profile),
-                '--test-recipient', 'ddkritsin@gmail.com'], env=env, stdout=log, stderr=log)
-            try:
-                deadline = time.monotonic() + 20
-                while time.monotonic() < deadline:
-                    if process.poll() is not None:
-                        raise RuntimeError(f'Web .app exited before becoming ready ({process.returncode})')
-                    try:
-                        instance = json.loads((profile / 'instance.json').read_text())
-                        origin = f'http://127.0.0.1:{instance["port"]}'
-                        headers = {'Cookie': 'maildesk=' + instance['session'], 'Origin': origin}
-                        request = urllib.request.Request(origin + '/api/state', headers=headers)
-                        state = json.load(client.open(request, timeout=2))
-                        assert state['project']['leads'] == []
-                        assert state['testRecipient'] == 'ddkritsin@gmail.com'
-                        break
-                    except (OSError, ValueError):
-                        time.sleep(0.2)
-                else:
-                    raise RuntimeError('Web .app did not serve an authenticated state request')
-                print('::notice::macOS web ZIP extracted, bundle signature verified, Launch Services opened the server and authenticated local state was received.')
-            finally:
-                if instance and origin and headers:
-                    request = urllib.request.Request(origin + '/api/quit', data=b'{}',
-                        headers={**headers, 'Content-Type': 'application/json'}, method='POST')
-                    try:
-                        client.open(request, timeout=3).close()
-                    except OSError:
-                        pass
-                try:
-                    process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    process.terminate()
-                    process.wait(timeout=5)
+        check_server(['open', '-n', '-W', str(app), '--args'], folder / 'launch-services-profile', env, client)
+        print('::notice::macOS web ZIP extracted, bundle signature verified, Launch Services opened the server and authenticated local state was received.')
+
+        quarantine = '0083;{:x};MailDesk CI;{}'.format(int(time.time()), '00000000-0000-4000-8000-000000000001')
+        for path in (app, binary, launcher):
+            subprocess.run(['xattr', '-w', 'com.apple.quarantine', quarantine, str(path)], check=True)
+        check_server(['/bin/sh', str(launcher)], folder / 'downloaded-profile', env, client)
+        for path in (app, binary):
+            assert subprocess.run(['xattr', '-p', 'com.apple.quarantine', str(path)], capture_output=True).returncode != 0
+        subprocess.run(['codesign', '--verify', '--deep', '--strict', str(app)], check=True)
+        print('::notice::Downloaded-file quarantine fixture: Terminal launcher verified the bundle, removed only its quarantine, and served authenticated local state.')
+
+        # Corrupt a sealed resource. The launcher must not remove quarantine,
+        # re-sign the bundle, create a profile, or execute the server.
+        icon = app / 'Contents/Resources/MailDesk.icns'
+        icon.write_bytes(icon.read_bytes() + b'corrupted-ci-fixture')
+        subprocess.run(['xattr', '-w', 'com.apple.quarantine', quarantine, str(app)], check=True)
+        rejected_profile = folder / 'rejected-profile'
+        rejected = subprocess.run(['/bin/sh', str(launcher), '--no-browser', '--data-dir',
+            str(rejected_profile), '--test-recipient', 'ddkritsin@gmail.com'],
+            input='\n', text=True, env=env, capture_output=True, timeout=10)
+        assert rejected.returncode != 0, rejected.stdout
+        assert not rejected_profile.exists()
+        assert subprocess.run(['xattr', '-p', 'com.apple.quarantine', str(app)], capture_output=True).returncode == 0
+        print('::notice::Modified bundle rejected before quarantine removal or server startup.')
 
 
 if __name__ == '__main__':

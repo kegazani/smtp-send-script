@@ -9,6 +9,7 @@ on:
       - web/**
       - scripts/build.py
       - scripts/macos_web.py
+      - scripts/macos_web_launch.command
       - assets/maildesk.icns
       - .github/workflows/web-macos.yml
 permissions:
