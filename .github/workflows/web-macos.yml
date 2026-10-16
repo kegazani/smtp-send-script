@@ -9,7 +9,8 @@ on:
       - web/**
       - scripts/build.py
       - scripts/macos_web.py
-      - scripts/macos_web_launch.command
+      - scripts/macos_web_check.py
+      - scripts/macos_web_install.command
       - assets/maildesk.icns
       - .github/workflows/web-macos.yml
 permissions:
@@ -40,8 +41,15 @@ jobs:
         run: go test ./...
       - name: Build and sign the web application
         run: python3 -c 'from scripts.build import build; build(("darwin", "${{ matrix.arch }}", "${{ matrix.label }}"))'
-      - name: Verify extracted web app and launch
-        run: python3 scripts/macos_web.py dist/MailDesk-${{ matrix.label }}.zip --smoke
+      - name: Verify fresh installation, Finder launch, update and rollback
+        run: python3 scripts/macos_web.py dist/MailDesk-${{ matrix.label }}.zip --smoke --report macos-web-checks/${{ matrix.label }}.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: macos-web-checks-${{ matrix.label }}
+          path: macos-web-checks/*.json
+          if-no-files-found: ignore
+          retention-days: 14
       - uses: actions/upload-artifact@v4
         with:
           name: web-${{ matrix.label }}

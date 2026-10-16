@@ -47,7 +47,7 @@ func (a *App) state(w http.ResponseWriter, r *http.Request) {
 	s.APIKey = ""
 	view := a.w
 	view.Files = nil
-	respond(w, map[string]any{"project": view, "settings": s, "smtpReady": a.cfg.Password != "" && validEmail(a.cfg.Username), "deepseekReady": a.cfg.APIKey != "", "sending": a.sending, "generating": a.generating, "jobError": a.jobError, "testRecipient": a.testRecipient, "generation": a.lastGeneration})
+	respond(w, map[string]any{"version": appVersion, "project": view, "settings": s, "smtpReady": a.cfg.Password != "" && validEmail(a.cfg.Username), "deepseekReady": a.cfg.APIKey != "", "sending": a.sending, "generating": a.generating, "jobError": a.jobError, "testRecipient": a.testRecipient, "generation": a.lastGeneration})
 }
 
 func (a *App) importFile(w http.ResponseWriter, r *http.Request) {

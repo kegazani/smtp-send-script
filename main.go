@@ -122,7 +122,33 @@ func main() {
 	seed := flag.String("import", "", "CSV для первоначального импорта в пустой проект")
 	noBrowser := flag.Bool("no-browser", false, "не открывать браузер")
 	testRecipient := flag.String("test-recipient", "", "разрешить отправку только на этот тестовый адрес")
+	prepare := flag.Bool("prepare-update", false, "завершить простаивающий экземпляр перед обновлением")
+	ready := flag.Bool("wait-ready", false, "дождаться запуска этой версии")
+	show := flag.Bool("open-running", false, "открыть интерфейс уже запущенной версии")
+	version := flag.Bool("version", false, "показать версию приложения")
 	flag.Parse()
+	if *version {
+		fmt.Printf("MailDesk %s %s/%s\n", appVersion, runtime.GOOS, runtime.GOARCH)
+		return
+	}
+	if *prepare || *ready || *show {
+		if *prepare {
+			err = prepareUpdate(*dir)
+		} else {
+			err = waitReady(*dir, *testRecipient)
+		}
+		if err != nil {
+			fatal(err)
+		}
+		if *show && !*noBrowser {
+			var active instance
+			if err := readJSON(filepath.Join(*dir, "instance.json"), &active); err != nil {
+				fatal(err)
+			}
+			openBrowser("http://127.0.0.1:" + strconv.Itoa(active.Port) + "/?session=" + active.Session)
+		}
+		return
+	}
 	// Optional personal distributions keep credentials beside, never inside, the executable.
 	if executable, e := os.Executable(); e == nil {
 		adjacent := filepath.Dir(executable)
