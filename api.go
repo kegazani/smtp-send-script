@@ -47,7 +47,7 @@ func (a *App) state(w http.ResponseWriter, r *http.Request) {
 	s.APIKey = ""
 	view := a.w
 	view.Files = nil
-	respond(w, map[string]any{"project": view, "settings": s, "smtpReady": a.cfg.Password != "" && validEmail(a.cfg.Username), "deepseekReady": a.cfg.APIKey != "", "sending": a.sending, "generating": a.generating, "jobError": a.jobError, "testRecipient": a.testRecipient})
+	respond(w, map[string]any{"project": view, "settings": s, "smtpReady": a.cfg.Password != "" && validEmail(a.cfg.Username), "deepseekReady": a.cfg.APIKey != "", "sending": a.sending, "generating": a.generating, "jobError": a.jobError, "testRecipient": a.testRecipient, "generation": a.lastGeneration})
 }
 
 func (a *App) importFile(w http.ResponseWriter, r *http.Request) {
@@ -170,7 +170,7 @@ func (a *App) template(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &t) {
 		return
 	}
-	if strings.TrimSpace(t.Subject) == "" || strings.TrimSpace(t.Body) == "" || strings.ContainsAny(t.Subject, "\r\n") || len(t.Body) > 50000 || len(t.Instructions) > 10000 {
+	if strings.TrimSpace(t.Subject) == "" || strings.TrimSpace(t.Body) == "" || strings.ContainsAny(t.Subject, "\r\n") || len(t.Body) > 50000 || len(t.Instructions) > 10000 || len(t.SenderProfile) > 20000 {
 		fail(w, 400, errors.New("нужны тема в одну строку и текст шаблона (до 50 000 символов)"))
 		return
 	}
@@ -234,18 +234,23 @@ func (a *App) smtpTest(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) updateLead(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		ID         string   `json:"id"`
-		Company    string   `json:"company"`
-		Email      string   `json:"email"`
-		Subject    string   `json:"subject"`
-		Body       string   `json:"body"`
-		Recipients []string `json:"recipients"`
+		ID          string   `json:"id"`
+		Company     string   `json:"company"`
+		Email       string   `json:"email"`
+		Subject     string   `json:"subject"`
+		Body        string   `json:"body"`
+		Recipients  []string `json:"recipients"`
+		Description *string  `json:"description"`
 	}
 	if !decode(w, r, &in) {
 		return
 	}
 	if strings.ContainsAny(in.Subject, "\r\n") || len(in.Subject) > 1000 || len(in.Body) > 50000 {
 		fail(w, 400, errors.New("проверьте название, тему и длину письма"))
+		return
+	}
+	if in.Description != nil && len(*in.Description) > 50000 {
+		fail(w, 400, errors.New("описание компании — не больше 50 000 символов"))
 		return
 	}
 	a.mu.Lock()
@@ -289,6 +294,10 @@ func (a *App) updateLead(w http.ResponseWriter, r *http.Request) {
 			}
 			err := a.commit(func() {
 				p := &a.w.Leads[i]
+				if p.Subject != strings.TrimSpace(in.Subject) || p.Body != strings.TrimSpace(in.Body) {
+					p.Source = "manual"
+					p.GenerationError = ""
+				}
 				p.Company = strings.TrimSpace(in.Company)
 				p.Email = strings.TrimSpace(in.Email)
 				if l.Kind == "message" {
@@ -296,6 +305,9 @@ func (a *App) updateLead(w http.ResponseWriter, r *http.Request) {
 				}
 				p.Subject = strings.TrimSpace(in.Subject)
 				p.Body = strings.TrimSpace(in.Body)
+				if l.Kind != "message" && in.Description != nil {
+					p.Description = strings.TrimSpace(*in.Description)
+				}
 			})
 			if err != nil {
 				fail(w, 500, err)
@@ -402,6 +414,7 @@ func (a *App) generateDrafts(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	a.generating = true
+	a.lastGeneration = GenerationSummary{Total: len(leads)}
 	a.stop = false
 	a.jobError = ""
 	s, t := a.cfg, a.w.Template
@@ -440,6 +453,16 @@ func (a *App) generateDrafts(w http.ResponseWriter, r *http.Request) {
 			})
 			if err != nil {
 				a.jobError = "Не удалось сохранить черновики: " + err.Error()
+			} else {
+				a.lastGeneration.Completed++
+				if e != nil {
+					a.lastGeneration.Failed++
+					a.lastGeneration.Error = cleanError(e, s)
+				} else if source == "deepseek" {
+					a.lastGeneration.Personalized++
+				} else {
+					a.lastGeneration.Templates++
+				}
 			}
 			a.mu.Unlock()
 			if err != nil {

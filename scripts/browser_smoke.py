@@ -86,6 +86,9 @@ def main():
         threading.Thread(target=server.serve_forever,daemon=True).start()
         data_dir = folder/'data'
         environment = dict(os.environ, SSL_CERT_FILE=str(cert))
+        # Fixture runs must not inherit personal provider credentials.
+        for name in ('LLM_API_KEY','SMTP_USERNAME','SMTP_FROM_EMAIL','SMTP_PASSWORD'):
+            environment.pop(name,None)
         process = subprocess.Popen([str(ROOT/'dist/maildesk'),'--no-browser','--port','0','--data-dir',str(data_dir),'--test-recipient',RECIPIENT],env=environment,stdout=subprocess.DEVNULL)
         try:
             info = wait_instance(data_dir,process)
@@ -105,6 +108,7 @@ def main():
                 expect(page.locator('#connection-result')).to_contain_text('авторизация работают',timeout=10000)
                 assert not server.messages
                 page.locator('[data-page="template"]').click()
+                page.locator('#template-form [name="senderProfile"]').fill('Тестовая команда обслуживает вентиляционное оборудование.')
                 page.locator('#template-form [name="subject"]').fill('Вопрос для {company}')
                 page.locator('#template-form [name="body"]').fill('Здравствуйте!\nТестовое письмо для {company}.')
                 page.get_by_role('button',name='Сохранить шаблон').click()
@@ -131,6 +135,20 @@ def main():
                 expect(page.locator('#send-button')).to_be_disabled()
                 page.get_by_role('button',name='Сохранить письмо').click()
                 expect(page.locator('#send-button')).to_be_enabled()
+                # An API failure must be visible and retain the previous draft.
+                page.locator('details.description > summary').click()
+                page.locator('#editor-form [name="description"]').fill('Производство VAV-клапанов')
+                page.get_by_role('button',name='Сохранить письмо').click()
+                expect(page.locator('#toast')).to_have_text('Письмо сохранено')
+                page.once('dialog',lambda dialog:dialog.accept())
+                page.locator('#generate-button').click()
+                expect(page.locator('#job-banner')).to_contain_text('ошибки: 1',timeout=10000)
+                expect(page.locator('.lead-row .status-chip')).to_contain_text(['Ошибка генерации','Нет адреса'])
+                expect(page.locator('#editor-form [name="body"]')).to_have_value('Здравствуйте!\nПроверенный вручную текст.')
+                expect(page.locator('.inline-error')).to_contain_text('добавьте ключ DeepSeek')
+                page.locator('#editor-form [name="body"]').fill('Здравствуйте!\nПроверенный вручную текст. Продолжим общение.')
+                page.get_by_role('button',name='Сохранить письмо').click()
+                expect(page.locator('#toast')).to_have_text('Письмо сохранено')
 
                 def send_with_confirmations():
                     before=len(server.messages)
@@ -207,6 +225,7 @@ def main():
                 exported=json.loads(export_file.read_text())
                 assert exported['leads'][0]['status']=='sent'
                 assert exported['version']==2 and len(exported['files'])==2
+                assert exported['template']['senderProfile']=='Тестовая команда обслуживает вентиляционное оборудование.'
                 assert len(exported['leads'][2]['attachments'])==2
                 assert 'test-only-password' not in export_file.read_text()
                 page.reload()

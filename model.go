@@ -40,9 +40,22 @@ type Lead struct {
 }
 
 type Template struct {
-	Subject      string `json:"subject"`
-	Body         string `json:"body"`
-	Instructions string `json:"instructions"`
+	Subject       string `json:"subject"`
+	Body          string `json:"body"`
+	Instructions  string `json:"instructions"`
+	SenderProfile string `json:"senderProfile,omitempty"`
+}
+
+const legacyGenerationInstructions = "Напиши короткое деловое письмо на русском языке. Используй предложение и подпись из шаблона. Не выдумывай факты о нас или компании получателя."
+const defaultGenerationInstructions = "Напиши индивидуальное деловое письмо на русском языке на основе описания компании. Упомяни её конкретную деятельность и задай уместный вопрос о возможном сотрудничестве. Пиши кратко и по-деловому. Не выдумывай сведения о нас или получателе."
+
+type GenerationSummary struct {
+	Total        int    `json:"total"`
+	Completed    int    `json:"completed"`
+	Personalized int    `json:"personalized"`
+	Templates    int    `json:"templates"`
+	Failed       int    `json:"failed"`
+	Error        string `json:"error,omitempty"`
 }
 
 type Workspace struct {
@@ -73,20 +86,21 @@ type Confirmation struct {
 }
 
 type App struct {
-	mu            sync.Mutex
-	w             Workspace
-	cfg           Settings
-	dir           string
-	session       string
-	origin        string
-	confirmation  *Confirmation
-	sending       bool
-	generating    bool
-	stop          bool
-	jobError      string
-	delay         time.Duration
-	testRecipient string
-	shutdown      func()
+	mu             sync.Mutex
+	w              Workspace
+	cfg            Settings
+	dir            string
+	session        string
+	origin         string
+	confirmation   *Confirmation
+	sending        bool
+	generating     bool
+	stop           bool
+	jobError       string
+	lastGeneration GenerationSummary
+	delay          time.Duration
+	testRecipient  string
+	shutdown       func()
 	// Test seams exercise real protocol adapters without contacting recipients.
 	deliver  func(Settings, Lead) (bool, error)
 	generate func(Settings, Template, Lead) (string, string, error)
@@ -142,12 +156,15 @@ func openApp(dir string) (*App, error) {
 	a.w = Workspace{Version: 2, Leads: []Lead{}, Sent: map[string]string{}, Template: Template{
 		Subject:      "Возможное сотрудничество с {company}",
 		Body:         "Здравствуйте!\n\nХотели бы обсудить возможное сотрудничество с {company}. Подскажите, с кем можно связаться по этому вопросу?\n\nС уважением,\nКоманда",
-		Instructions: "Напиши короткое деловое письмо на русском языке. Используй предложение и подпись из шаблона. Не выдумывай факты о нас или компании получателя."}}
+		Instructions: defaultGenerationInstructions}}
 	if err := readJSON(filepath.Join(dir, "project.json"), &a.w); err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("не удалось прочитать проект: %w", err)
 	}
 	if a.w.Version != 1 && a.w.Version != 2 {
 		return nil, errors.New("неподдерживаемая версия проекта")
+	}
+	if a.w.Template.Instructions == legacyGenerationInstructions {
+		a.w.Template.Instructions = defaultGenerationInstructions
 	}
 	if a.w.Version == 1 {
 		// Keep an untouched legacy copy before upgrading the portable format.
@@ -307,7 +324,14 @@ func csvLeads(r io.Reader) ([]Lead, error) {
 			}
 			return strings.TrimSpace(rec[i])
 		}
-		l := Lead{ID: randomID(), Company: get("company"), Email: get("email"), Website: get("website"), City: get("city"), Industry: get("industry"), Description: get("overview"), Status: "pending"}
+		description := ""
+		for _, name := range []string{"overview", "description", "company description", "описание", "описание компании"} {
+			if value := get(name); value != "" {
+				description = value
+				break
+			}
+		}
+		l := Lead{ID: randomID(), Company: get("company"), Email: get("email"), Website: get("website"), City: get("city"), Industry: get("industry"), Description: description, Status: "pending"}
 		if l.Company == "" && l.Email == "" {
 			continue
 		}
@@ -347,6 +371,21 @@ func (a *App) merge(leads []Lead, sent map[string]string) (added, skipped int) {
 		}
 		if i, ok := known[identity(l)]; ok {
 			skipped++
+			// A fresh CSV can add missing company context without replacing drafts.
+			if l.Kind != "message" && a.w.Leads[i].Status != "sent" {
+				if l.Description != "" {
+					a.w.Leads[i].Description = l.Description
+				}
+				if l.Website != "" {
+					a.w.Leads[i].Website = l.Website
+				}
+				if l.City != "" {
+					a.w.Leads[i].City = l.City
+				}
+				if l.Industry != "" {
+					a.w.Leads[i].Industry = l.Industry
+				}
+			}
 			if a.w.Leads[i].Status != "sent" && (a.w.Leads[i].Status != "unknown" || l.Status == "sent") && (l.Status == "sent" || l.Kind == "message" || l.Subject != "" || l.Body != "" || len(l.Attachments) > 0) {
 				l.ID = a.w.Leads[i].ID
 				a.w.Leads[i] = l
