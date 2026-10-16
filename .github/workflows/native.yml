@@ -10,6 +10,7 @@ on:
       - assets/**
       - NATIVE.md
       - scripts/package_native.py
+      - scripts/macos_smoke.py
       - .github/workflows/native.yml
 permissions:
   contents: read
@@ -63,6 +64,18 @@ jobs:
       - run: cargo test --locked -p maildesk-core --target ${{ matrix.target }}
       - run: cargo build --locked --release -p maildesk-gpui --target ${{ matrix.target }}
       - run: python scripts/package_native.py --binary target/${{ matrix.target }}/release/${{ matrix.binary }} --label ${{ matrix.label }} --output native-packages
+      - name: Verify extracted macOS app and launch
+        if: runner.os == 'macOS'
+        run: python3 scripts/macos_smoke.py native-packages/MailDesk-Native-${{ matrix.label }}.zip --report native-packages/${{ matrix.label }}-smoke.json
+      - uses: actions/upload-artifact@v4
+        if: always() && runner.os == 'macOS'
+        with:
+          name: macos-smoke-${{ matrix.label }}
+          path: |
+            native-packages/*-smoke.json
+            native-packages/*-smoke.log
+          if-no-files-found: ignore
+          retention-days: 14
       - uses: actions/upload-artifact@v4
         with:
           name: native-${{ matrix.label }}

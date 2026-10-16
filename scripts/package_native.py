@@ -4,12 +4,16 @@ import hashlib
 import plistlib
 from pathlib import Path
 import shutil
+import subprocess
+import sys
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def package(binary, label, output):
+    if label.startswith('macOS') and sys.platform != 'darwin':
+        raise RuntimeError('Package macOS applications on macOS so the complete .app can be signed and verified')
     folder = output / f'MailDesk-Native-{label}'
     folder.mkdir(parents=True, exist_ok=True)
     files = []
@@ -20,7 +24,7 @@ def package(binary, label, output):
         resources.mkdir(parents=True, exist_ok=True)
         info = {'CFBundleExecutable': 'MailDesk', 'CFBundleIdentifier': 'local.maildesk.app',
                 'CFBundleName': 'MailDesk', 'CFBundleDisplayName': 'MailDesk',
-                'CFBundleShortVersionString': '2.0.0', 'CFBundleVersion': '4',
+                'CFBundleShortVersionString': '2.0.0', 'CFBundleVersion': '5',
                 'CFBundlePackageType': 'APPL', 'CFBundleIconFile': 'MailDesk.icns',
                 'LSMinimumSystemVersion': '12.0', 'NSHighResolutionCapable': True}
         (contents / 'Info.plist').write_bytes(plistlib.dumps(info))
@@ -31,6 +35,21 @@ def package(binary, label, output):
     executable.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(binary, executable)
     executable.chmod(0o755)
+    if label.startswith('macOS'):
+        # The linker's signature covers the Mach-O alone. Finder opens the
+        # entire bundle, so seal Info.plist, the icon and the executable only
+        # after every bundle resource has reached its final location.
+        app = contents.parent
+        pkg_info = contents / 'PkgInfo'
+        pkg_info.write_bytes(b'APPL????')
+        files.append(pkg_info)
+        subprocess.run(['codesign', '--force', '--sign', '-', '--timestamp=none',
+                        '--identifier', info['CFBundleIdentifier'], str(app)], check=True)
+        subprocess.run(['codesign', '--verify', '--deep', '--strict', '--verbose=2', str(app)], check=True)
+        seal = contents / '_CodeSignature' / 'CodeResources'
+        if not seal.is_file():
+            raise RuntimeError('The macOS application resource seal is missing')
+        files.append(seal)
     shutil.copyfile(ROOT / 'NATIVE.md', folder / 'ИНСТРУКЦИЯ.md')
     shutil.copyfile(ROOT / 'assets/maildesk.png', folder / 'maildesk.png')
     example = folder / 'Пример.csv'
