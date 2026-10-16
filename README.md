@@ -1,6 +1,22 @@
 # MailDesk
 
-**Новая нативная версия на Rust + GPUI:** [описание и запуск](NATIVE.md). Исходники находятся в `crates/`, сборки называются `MailDesk-Native-…zip`. Готовая локальная веб-версия описана ниже и продолжает работать независимо.
+## Нативное приложение — Rust + GPUI
+
+MailDesk 2 открывает отдельное нативное окно. CSV, DeepSeek, SMTP, обычные письма с несколькими адресатами, вложения и два подтверждения отправки доступны в приложении. Проекты JSON совместимы с веб-версией; подключения и компании из прежнего профиля сохраняются.
+
+| Система | Скачать нативное приложение |
+| --- | --- |
+| Windows x64 | [MailDesk-Native-Windows-x64.zip](https://github.com/kegazani/smtp-send-script/raw/refs/heads/main/dist/MailDesk-Native-Windows-x64.zip) |
+| Windows ARM64 | [MailDesk-Native-Windows-ARM64.zip](https://github.com/kegazani/smtp-send-script/raw/refs/heads/main/dist/MailDesk-Native-Windows-ARM64.zip) |
+| macOS Apple Silicon | [MailDesk-Native-macOS-AppleSilicon.zip](https://github.com/kegazani/smtp-send-script/raw/refs/heads/main/dist/MailDesk-Native-macOS-AppleSilicon.zip) |
+| macOS Intel | [MailDesk-Native-macOS-Intel.zip](https://github.com/kegazani/smtp-send-script/raw/refs/heads/main/dist/MailDesk-Native-macOS-Intel.zip) |
+| Linux x64 | [MailDesk-Native-Linux-x64.zip](https://github.com/kegazani/smtp-send-script/raw/refs/heads/main/dist/MailDesk-Native-Linux-x64.zip) |
+
+[Инструкция и сборка](NATIVE.md) · [GitHub Actions](https://github.com/kegazani/smtp-send-script/actions/workflows/native.yml) · [Контрольные суммы](dist/SHA256SUMS.txt).
+
+Иконка включена в EXE и macOS `.app`; исходные файлы: [PNG](assets/maildesk.png), [ICO](assets/maildesk.ico), [ICNS](assets/maildesk.icns). Общие архивы содержат только приложение и примеры; подключения задаются в **Подключения** или личным `maildesk.env` рядом с приложением. Перед открытием того же профиля закройте веб-версию.
+
+## Локальная веб-версия — Go
 
 Небольшое локальное приложение для подготовки и ручной отправки деловых писем. Один исполняемый файл содержит сервер и интерфейс. Для пользователя не нужны Python, Node.js, Go или установка пакетов: запускаете приложение, оно открывает браузер. Интернет нужен для DeepSeek и SMTP.
 
