@@ -1,0 +1,96 @@
+name: Native MailDesk
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - crates/**
+      - assets/**
+      - NATIVE.md
+      - scripts/package_native.py
+      - .github/workflows/native.yml
+permissions:
+  contents: read
+concurrency:
+  group: native-maildesk-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            label: Windows-x64
+            binary: maildesk.exe
+          - runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            label: Windows-ARM64
+            binary: maildesk.exe
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            label: macOS-AppleSilicon
+            binary: maildesk
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            label: macOS-Intel
+            binary: maildesk
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            label: Linux-x64
+            binary: maildesk
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: native-${{ matrix.target }}
+      - name: Linux system libraries
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libfreetype6-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libvulkan-dev
+      - name: Use the static Windows runtime
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo 'RUSTFLAGS=-C target-feature=+crt-static' >> "$GITHUB_ENV"
+      - run: cargo fmt --all --check
+      - run: cargo test --locked -p maildesk-core --target ${{ matrix.target }}
+      - run: cargo build --locked --release -p maildesk-gpui --target ${{ matrix.target }}
+      - run: python scripts/package_native.py --binary target/${{ matrix.target }}/release/${{ matrix.binary }} --label ${{ matrix.label }} --output native-packages
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.label }}
+          path: native-packages/*.zip
+          retention-days: 14
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: native-*
+          path: native-packages
+          merge-multiple: true
+      - name: Publish generic applications to dist
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          cp native-packages/*.zip dist/
+          python3 scripts/package_native.py --checksums-only
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add dist/MailDesk-Native-*.zip dist/SHA256SUMS.txt
+          git diff --cached --quiet || git commit -m 'Publish native MailDesk applications'
+          git push origin HEAD:main

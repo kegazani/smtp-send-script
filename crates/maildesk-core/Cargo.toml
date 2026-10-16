@@ -1,0 +1,25 @@
+[package]
+name = "maildesk-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+csv = "1"
+dirs = "6"
+dotenvy = "0.15"
+fs2 = "0.4"
+lettre = { version = "0.11.23", default-features = false, features = ["smtp-transport", "builder", "rustls-tls", "hostname"] }
+mime_guess = "2"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls-native-roots"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tempfile = "3"
+uuid = { version = "1", features = ["v4"] }
+
+
+[dev-dependencies]
+mailparse = "0.16"

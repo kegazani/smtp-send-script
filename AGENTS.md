@@ -3,3 +3,5 @@
 During development and testing, send actual email only to `ddkritsin@gmail.com`, as explicitly required by the user. Never send test mail to companies in the imported leads or any other address. Run the development server with `--test-recipient ddkritsin@gmail.com`. Protocol tests use local fake services and must not contact real SMTP recipients.
 
 Never commit credentials, local project data, uploaded lead files, or personal distribution archives. The user has explicitly requested publishing the generic application ZIPs and SHA256SUMS.txt under `dist/`; those artifacts may be committed. Keep unpacked build outputs ignored. Existing credentials are stored outside this checkout in `/workspace/smtp-send-script-local/.env`; do not print their values. This is a coding task; application files may be edited.
+
+The native desktop application uses Rust/GPUI in `crates/`. Run `cargo test --locked -p maildesk-core` and build `maildesk-gpui`. Native development launches must also include `--test-recipient ddkritsin@gmail.com`. Close the web application before opening the same profile in the native application.
