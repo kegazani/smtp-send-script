@@ -7,6 +7,7 @@ import plistlib
 import shutil
 import stat
 import subprocess
+import sys
 import zipfile
 
 ROOT=Path(__file__).resolve().parents[1]
@@ -23,7 +24,7 @@ def build(target):
         contents=folder/'MailDesk.app'/'Contents'
         binary=contents/'MacOS'/'MailDesk'
         binary.parent.mkdir(parents=True,exist_ok=True)
-        info={'CFBundleExecutable':'MailDesk','CFBundleIdentifier':'local.maildesk.app','CFBundleName':'MailDesk','CFBundleDisplayName':'MailDesk','CFBundleShortVersionString':'1.1.1','CFBundleVersion':'3','CFBundlePackageType':'APPL','LSMinimumSystemVersion':'12.0'}
+        info={'CFBundleExecutable':'MailDesk','CFBundleIdentifier':'local.maildesk.web','CFBundleName':'MailDesk','CFBundleDisplayName':'MailDesk','CFBundleShortVersionString':'1.1.1','CFBundleVersion':'4','CFBundleInfoDictionaryVersion':'6.0','CFBundlePackageType':'APPL','LSMinimumSystemVersion':'12.0','LSUIElement':True}
         (contents/'Info.plist').write_bytes(plistlib.dumps(info))
         launcher=folder/'Запустить MailDesk.command'
         launcher.write_text('#!/bin/sh\ncd "$(dirname "$0")"\nexec ./MailDesk.app/Contents/MacOS/MailDesk\n')
@@ -43,6 +44,10 @@ def build(target):
         # credentials or user data left beside an unpacked application.
         for file in sorted(package_files):
             z.write(file,Path(folder.name)/file.relative_to(folder))
+    if system=='darwin' and sys.platform=='darwin':
+        sys.path.insert(0,str(ROOT))
+        from scripts.macos_web import seal_archive
+        seal_archive(archive)
     print(f'Built {archive.name}',flush=True)
     return archive
 
@@ -50,7 +55,8 @@ def build(target):
 def main():
     DIST.mkdir(exist_ok=True)
     with ThreadPoolExecutor(max_workers=2) as pool:
-        archives=list(pool.map(build,TARGETS))
+        list(pool.map(build,TARGETS))
+    archives=sorted(DIST.glob('MailDesk-*.zip'))
     (DIST/'SHA256SUMS.txt').write_text(''.join(f'{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}\n' for p in archives))
 
 

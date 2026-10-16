@@ -8,3 +8,4 @@
 *.log
 *.test
 /target/
+__pycache__/

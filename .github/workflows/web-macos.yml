@@ -1,0 +1,72 @@
+name: macOS web MailDesk
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '*.go'
+      - go.mod
+      - web/**
+      - scripts/build.py
+      - scripts/macos_web.py
+      - assets/maildesk.icns
+      - .github/workflows/web-macos.yml
+permissions:
+  contents: read
+concurrency:
+  group: web-macos-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+            label: macOS-AppleSilicon
+          - runner: macos-15-intel
+            arch: amd64
+            label: macOS-Intel
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Build and sign the web application
+        run: python3 -c 'from scripts.build import build; build(("darwin", "${{ matrix.arch }}", "${{ matrix.label }}"))'
+      - name: Verify extracted web app and launch
+        run: python3 scripts/macos_web.py dist/MailDesk-${{ matrix.label }}.zip --smoke
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-${{ matrix.label }}
+          path: dist/MailDesk-${{ matrix.label }}.zip
+          retention-days: 14
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: web-macOS-*
+          path: web-packages
+          merge-multiple: true
+      - name: Publish verified Mac web applications
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          cp web-packages/*.zip dist/
+          python3 scripts/package_native.py --checksums-only
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add dist/MailDesk-macOS-*.zip dist/SHA256SUMS.txt
+          git diff --cached --quiet || git commit -m 'Publish signed and launch-tested macOS web applications'
+          git push origin HEAD:main
