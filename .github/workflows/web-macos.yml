@@ -36,6 +36,8 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
+      - name: Test web workflows and both CSV formats
+        run: go test ./...
       - name: Build and sign the web application
         run: python3 -c 'from scripts.build import build; build(("darwin", "${{ matrix.arch }}", "${{ matrix.label }}"))'
       - name: Verify extracted web app and launch

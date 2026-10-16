@@ -96,7 +96,7 @@ func TestGenerationUsesDescriptionOrFallbackAndReportsErrors(t *testing.T) {
 }
 
 func TestCSVDescriptionAliasesAndReimportRefreshContext(t *testing.T) {
-	for _, header := range []string{"Overview", "Description", "Company description", "Описание", "Описание компании"} {
+	for _, header := range []string{"Overview", "Company Overview", "Description", "Company description", "Описание", "Описание компании"} {
 		csv := "Company,Email," + header + "\nКомпания," + testRecipient + ",Производство VAV-клапанов\n"
 		leads, err := csvLeads(strings.NewReader(csv))
 		if err != nil || leads[0].Description != "Производство VAV-клапанов" {

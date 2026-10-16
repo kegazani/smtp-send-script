@@ -302,8 +302,10 @@ func csvLeads(r io.Reader) ([]Lead, error) {
 	for i, h := range head {
 		cols[strings.ToLower(strings.TrimSpace(h))] = i
 	}
-	if _, ok := cols["company"]; !ok {
-		return nil, errors.New("нужна колонка Company")
+	if _, company := cols["company"]; !company {
+		if _, name := cols["name"]; !name {
+			return nil, errors.New("нужна колонка Company или Name с названием компании")
+		}
 	}
 	if _, ok := cols["email"]; !ok {
 		return nil, errors.New("нужна колонка Email")
@@ -317,21 +319,28 @@ func csvLeads(r io.Reader) ([]Lead, error) {
 		if e != nil {
 			return nil, fmt.Errorf("строка %d: %w", row, e)
 		}
-		get := func(name string) string {
-			i, ok := cols[name]
-			if !ok || i >= len(rec) {
-				return ""
+		get := func(names ...string) string {
+			for _, name := range names {
+				i, ok := cols[name]
+				if !ok || i >= len(rec) {
+					continue
+				}
+				if value := strings.TrimSpace(rec[i]); value != "" {
+					return value
+				}
 			}
-			return strings.TrimSpace(rec[i])
+			return ""
 		}
-		description := ""
-		for _, name := range []string{"overview", "description", "company description", "описание", "описание компании"} {
-			if value := get(name); value != "" {
-				description = value
-				break
-			}
+		l := Lead{
+			ID:          randomID(),
+			Company:     get("company", "name"),
+			Email:       get("email"),
+			Website:     get("website", "domain name / link url"),
+			City:        get("city", "hq location"),
+			Industry:    get("industry"),
+			Description: get("overview", "company overview", "description", "company description", "описание", "описание компании"),
+			Status:      "pending",
 		}
-		l := Lead{ID: randomID(), Company: get("company"), Email: get("email"), Website: get("website"), City: get("city"), Industry: get("industry"), Description: description, Status: "pending"}
 		if l.Company == "" && l.Email == "" {
 			continue
 		}

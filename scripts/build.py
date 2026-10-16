@@ -24,7 +24,7 @@ def build(target):
         contents=folder/'MailDesk.app'/'Contents'
         binary=contents/'MacOS'/'MailDesk'
         binary.parent.mkdir(parents=True,exist_ok=True)
-        info={'CFBundleExecutable':'MailDesk','CFBundleIdentifier':'local.maildesk.web','CFBundleName':'MailDesk','CFBundleDisplayName':'MailDesk','CFBundleShortVersionString':'1.1.1','CFBundleVersion':'4','CFBundleInfoDictionaryVersion':'6.0','CFBundlePackageType':'APPL','LSMinimumSystemVersion':'12.0','LSUIElement':True}
+        info={'CFBundleExecutable':'MailDesk','CFBundleIdentifier':'local.maildesk.web','CFBundleName':'MailDesk','CFBundleDisplayName':'MailDesk','CFBundleShortVersionString':'1.1.2','CFBundleVersion':'5','CFBundleInfoDictionaryVersion':'6.0','CFBundlePackageType':'APPL','LSMinimumSystemVersion':'12.0','LSUIElement':True}
         (contents/'Info.plist').write_bytes(plistlib.dumps(info))
         launcher=folder/'Запустить MailDesk.command'
         shutil.copyfile(ROOT/'scripts/macos_web_launch.command',launcher)
