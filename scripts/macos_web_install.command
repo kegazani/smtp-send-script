@@ -73,11 +73,13 @@ if [ -n "$maildesk_archive" ] || [ ! -d "$maildesk_source" ]; then
     fi
     [ -f "$maildesk_archive" ] || maildesk_fail 'Выбранный ZIP не найден.'
     /usr/bin/unzip -tq "$maildesk_archive" >/dev/null || maildesk_fail 'ZIP повреждён. Установка отменена.'
-    /usr/bin/unzip -Z -1 "$maildesk_archive" | /usr/bin/awk '
+    # macOS ZIP tools can render non-ASCII names in a legacy encoding. These
+    # path and link checks inspect ASCII syntax byte by byte, not filename text.
+    /usr/bin/unzip -Z -1 "$maildesk_archive" | LC_ALL=C /usr/bin/awk '
         /^\// || /(^|\/)\.\.($|\/)/ || /\\/ { bad = 1 }
         END { exit bad }
     ' || maildesk_fail 'В ZIP недопустимые пути.'
-    /usr/bin/zipinfo -l "$maildesk_archive" | /usr/bin/awk '
+    /usr/bin/zipinfo -l "$maildesk_archive" | LC_ALL=C /usr/bin/awk '
         substr($0, 1, 1) == "l" { bad = 1 }
         END { exit bad }
     ' || maildesk_fail 'ZIP с символическими ссылками не поддерживается.'
