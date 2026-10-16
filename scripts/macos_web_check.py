@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import traceback
 import urllib.request
 
 
@@ -20,6 +21,10 @@ def smoke(archive, report_path=None):
     def passed(message):
         report['checks'].append(message)
         print('::notice::' + message, flush=True)
+
+    def failure(message):
+        escaped = message.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+        print('::error::' + escaped, flush=True)
 
     def state(profile):
         instance = json.loads((profile / 'instance.json').read_text())
@@ -42,7 +47,7 @@ def smoke(archive, report_path=None):
         result = subprocess.run(args, input='\n', text=True, env=environment,
             capture_output=True, timeout=timeout)
         if (result.returncode == 0) != success:
-            print(result.stdout, result.stderr, flush=True)
+            failure(result.stdout + '\n' + result.stderr)
             raise AssertionError(f'Unexpected installer status: {result.returncode}')
         return result
 
@@ -100,7 +105,7 @@ def smoke(archive, report_path=None):
 
             # Close and reopen exactly as a user opens the installed .app.
             command([str(binary), '--prepare-update'] + app_args)
-            launch = subprocess.Popen(['open', '-n', '-W', str(installed), '--args'] + app_args, env=environment)
+            command(['open', '-n', str(installed), '--args'] + app_args)
             command([str(binary), '--wait-ready'] + app_args)
             assert json.loads((profile / 'project.json').read_text()) == saved_project
             passed('Installed Finder launch: stopped the server, reopened the installed .app through Launch Services, received authenticated state with the saved project.')
@@ -108,7 +113,6 @@ def smoke(archive, report_path=None):
             old_session = json.loads((profile / 'instance.json').read_text())['session']
             old_inode = installed.stat().st_ino
             command(['/bin/sh', str(helper), '--archive', str(archive)] + app_args)
-            launch.wait(timeout=10)
             assert installed.stat().st_ino != old_inode
             assert json.loads((profile / 'instance.json').read_text())['session'] != old_session
             assert json.loads((profile / 'project.json').read_text()) == saved_project
@@ -169,6 +173,7 @@ def smoke(archive, report_path=None):
         except Exception as error:
             report['result'] = 'failed'
             report['error'] = str(error)
+            failure(traceback.format_exc())
             raise
         finally:
             if busy_server:
