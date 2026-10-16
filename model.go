@@ -18,7 +18,11 @@ import (
 )
 
 type Lead struct {
-	ID              string `json:"id"`
+	ID              string       `json:"id"`
+	Kind            string       `json:"kind,omitempty"`
+	Recipients      []string     `json:"recipients,omitempty"`
+	Attachments     []Attachment `json:"attachments,omitempty"`
+	files           map[string][]byte
 	Company         string `json:"company"`
 	Email           string `json:"email"`
 	Website         string `json:"website"`
@@ -46,6 +50,7 @@ type Workspace struct {
 	Template Template          `json:"template"`
 	Leads    []Lead            `json:"leads"`
 	Sent     map[string]string `json:"sent"`
+	Files    map[string][]byte `json:"files,omitempty"`
 }
 
 type Settings struct {
@@ -134,15 +139,42 @@ func openApp(dir string) (*App, error) {
 		return nil, err
 	}
 	a := &App{dir: dir, session: randomID(), deliver: sendSMTP, generate: generateDeepSeek, delay: time.Second}
-	a.w = Workspace{Version: 1, Leads: []Lead{}, Sent: map[string]string{}, Template: Template{
+	a.w = Workspace{Version: 2, Leads: []Lead{}, Sent: map[string]string{}, Template: Template{
 		Subject:      "Возможное сотрудничество с {company}",
 		Body:         "Здравствуйте!\n\nХотели бы обсудить возможное сотрудничество с {company}. Подскажите, с кем можно связаться по этому вопросу?\n\nС уважением,\nКоманда",
 		Instructions: "Напиши короткое деловое письмо на русском языке. Используй предложение и подпись из шаблона. Не выдумывай факты о нас или компании получателя."}}
 	if err := readJSON(filepath.Join(dir, "project.json"), &a.w); err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("не удалось прочитать проект: %w", err)
 	}
-	if a.w.Version != 1 {
+	if a.w.Version != 1 && a.w.Version != 2 {
 		return nil, errors.New("неподдерживаемая версия проекта")
+	}
+	if a.w.Version == 1 {
+		// Keep an untouched legacy copy before upgrading the portable format.
+		original, e := os.ReadFile(filepath.Join(dir, "project.json"))
+		if e != nil {
+			return nil, e
+		}
+		backup, e := os.OpenFile(filepath.Join(dir, "project-v1.backup.json"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+		if e == nil {
+			_, e = backup.Write(original)
+			closeErr := backup.Close()
+			if e != nil {
+				return nil, e
+			}
+			if closeErr != nil {
+				return nil, closeErr
+			}
+		} else if !os.IsExist(e) {
+			return nil, e
+		}
+		a.w.Version = 2
+	}
+	if a.w.Files == nil {
+		a.w.Files = map[string][]byte{}
+	}
+	if err := validateWorkspaceFiles(a.w); err != nil {
+		return nil, err
 	}
 	if a.w.Sent == nil {
 		a.w.Sent = map[string]string{}
@@ -176,7 +208,7 @@ func openApp(dir string) (*App, error) {
 			l.Status = "unknown"
 			l.Error = "Приложение закрылось во время отправки. Проверьте доставку у провайдера перед повтором."
 		}
-		if l.Status == "sent" {
+		if l.Status == "sent" && l.Kind != "message" {
 			a.w.Sent[emailKey(l.Email)] = l.SentAt
 		}
 	}
@@ -193,10 +225,15 @@ func (a *App) save() error { return atomicJSON(filepath.Join(a.dir, "project.jso
 
 // commit rolls back mutations when the persistent write fails. Caller holds mu.
 func (a *App) commit(change func()) error {
-	before, _ := json.Marshal(a.w)
+	before, err := json.Marshal(a.w)
+	if err != nil {
+		return err
+	}
 	change()
 	if err := a.save(); err != nil {
-		_ = json.Unmarshal(before, &a.w)
+		var restored Workspace
+		_ = json.Unmarshal(before, &restored)
+		a.w = restored
 		return err
 	}
 	return nil
@@ -211,13 +248,16 @@ func validEmail(s string) bool {
 	return err == nil && a.Address == strings.TrimSpace(s) && strings.Contains(a.Address, ".")
 }
 func identity(l Lead) string {
+	if l.Kind == "message" {
+		return "message:" + l.ID
+	}
 	if validEmail(l.Email) {
 		return emailKey(l.Email)
 	}
 	return "company:" + strings.ToLower(strings.TrimSpace(l.Company))
 }
 func editable(l Lead) bool   { return l.Status != "sent" && l.Status != "sending" }
-func selectable(l Lead) bool { return editable(l) && l.Status != "unknown" && validEmail(l.Email) }
+func selectable(l Lead) bool { return editable(l) && l.Status != "unknown" && validRecipients(l) }
 
 func csvLeads(r io.Reader) ([]Lead, error) {
 	b, err := io.ReadAll(io.LimitReader(r, 20*1024*1024+1))
@@ -292,27 +332,33 @@ func (a *App) merge(leads []Lead, sent map[string]string) (added, skipped int) {
 		}
 	}
 	known := map[string]int{}
+	usedIDs := map[string]bool{}
 	for i, l := range a.w.Leads {
 		known[identity(l)] = i
+		usedIDs[l.ID] = true
 	}
 	for _, l := range leads {
-		if l.Status == "sent" {
+		if l.Status == "sending" {
+			l.Status = "unknown"
+			l.Error = "Перенесено во время отправки. Проверьте доставку перед повтором."
+		}
+		if l.Status == "sent" && l.Kind != "message" {
 			a.w.Sent[emailKey(l.Email)] = l.SentAt
 		}
 		if i, ok := known[identity(l)]; ok {
 			skipped++
-			if l.Status == "sent" && a.w.Leads[i].Status != "sent" {
+			if a.w.Leads[i].Status != "sent" && (a.w.Leads[i].Status != "unknown" || l.Status == "sent") && (l.Status == "sent" || l.Kind == "message" || l.Subject != "" || l.Body != "" || len(l.Attachments) > 0) {
+				l.ID = a.w.Leads[i].ID
 				a.w.Leads[i] = l
 			}
 			continue
 		}
-		l.ID = randomID()
+		if l.ID == "" || usedIDs[l.ID] {
+			l.ID = randomID()
+		}
+		usedIDs[l.ID] = true
 		if l.Status == "" {
 			l.Status = "pending"
-		}
-		if l.Status == "sending" {
-			l.Status = "unknown"
-			l.Error = "Перенесено во время отправки. Проверьте доставку перед повтором."
 		}
 		known[identity(l)] = len(a.w.Leads)
 		a.w.Leads = append(a.w.Leads, l)
@@ -320,6 +366,9 @@ func (a *App) merge(leads []Lead, sent map[string]string) (added, skipped int) {
 	}
 	for i := range a.w.Leads {
 		l := &a.w.Leads[i]
+		if l.Kind == "message" {
+			continue
+		}
 		if at, ok := a.w.Sent[emailKey(l.Email)]; ok {
 			l.Status = "sent"
 			l.SentAt = at

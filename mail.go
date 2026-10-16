@@ -9,11 +9,13 @@ import (
 	"fmt"
 	"io"
 	"mime"
+	"mime/multipart"
 	"mime/quotedprintable"
 	"net"
 	"net/http"
 	"net/mail"
 	"net/smtp"
+	"net/textproto"
 	"strconv"
 	"strings"
 	"time"
@@ -80,21 +82,65 @@ func smtpConnect(s Settings, tlsConfig *tls.Config) (*smtp.Client, error) {
 }
 
 func messageBytes(s Settings, l Lead) ([]byte, error) {
-	if !validEmail(l.Email) || strings.ContainsAny(l.Subject, "\r\n") {
+	if !validRecipients(l) || strings.ContainsAny(l.Subject, "\r\n") || strings.ContainsAny(l.MessageID, "\r\n<>") {
 		return nil, errors.New("некорректный получатель или тема письма")
+	}
+	if err := validateAttachments(l, l.files); err != nil {
+		return nil, err
 	}
 	from := (&mail.Address{Name: s.SenderName, Address: s.From}).String()
 	var b bytes.Buffer
-	fmt.Fprintf(&b, "From: %s\r\nTo: %s\r\nSubject: %s\r\nDate: %s\r\nMessage-ID: <%s>\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n", from, l.Email, mime.QEncoding.Encode("UTF-8", l.Subject), time.Now().Format(time.RFC1123Z), l.MessageID)
-	q := quotedprintable.NewWriter(&b)
-	_, err := q.Write([]byte(strings.ReplaceAll(strings.ReplaceAll(l.Body, "\r\n", "\n"), "\n", "\r\n")))
+	fmt.Fprintf(&b, "From: %s\r\nTo: %s\r\nSubject: %s\r\nDate: %s\r\nMessage-ID: <%s>\r\nMIME-Version: 1.0\r\n", from, strings.Join(recipients(l), ",\r\n "), mime.QEncoding.Encode("UTF-8", l.Subject), time.Now().Format(time.RFC1123Z), l.MessageID)
+	if len(l.Attachments) == 0 {
+		b.WriteString("Content-Type: text/plain; charset=UTF-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n")
+		if err := writeText(&b, l.Body); err != nil {
+			return nil, err
+		}
+		return b.Bytes(), nil
+	}
+	mixed := multipart.NewWriter(&b)
+	fmt.Fprintf(&b, "Content-Type: multipart/mixed; boundary=%q\r\n\r\n", mixed.Boundary())
+	header := textproto.MIMEHeader{"Content-Type": {"text/plain; charset=UTF-8"}, "Content-Transfer-Encoding": {"quoted-printable"}}
+	part, err := mixed.CreatePart(header)
 	if err != nil {
 		return nil, err
 	}
-	if err = q.Close(); err != nil {
+	if err = writeText(part, l.Body); err != nil {
+		return nil, err
+	}
+	for _, f := range l.Attachments {
+		mediaType, params, _ := mime.ParseMediaType(f.ContentType)
+		params["name"] = f.Name
+		header = textproto.MIMEHeader{"Content-Type": {mime.FormatMediaType(mediaType, params)}, "Content-Disposition": {mime.FormatMediaType("attachment", map[string]string{"filename": f.Name})}, "Content-Transfer-Encoding": {"base64"}}
+		part, err = mixed.CreatePart(header)
+		if err != nil {
+			return nil, err
+		}
+		encoded := base64.StdEncoding.EncodeToString(l.files[f.ID])
+		for len(encoded) > 0 {
+			n := 76
+			if len(encoded) < n {
+				n = len(encoded)
+			}
+			if _, err = io.WriteString(part, encoded[:n]+"\r\n"); err != nil {
+				return nil, err
+			}
+			encoded = encoded[n:]
+		}
+	}
+	if err = mixed.Close(); err != nil {
 		return nil, err
 	}
 	return b.Bytes(), nil
+}
+
+func writeText(w io.Writer, body string) error {
+	q := quotedprintable.NewWriter(w)
+	_, err := q.Write([]byte(strings.ReplaceAll(strings.ReplaceAll(body, "\r\n", "\n"), "\n", "\r\n")))
+	if err != nil {
+		return err
+	}
+	return q.Close()
 }
 
 // ambiguous is true only once the message body may have reached the server.
@@ -107,8 +153,10 @@ func deliverSMTP(c *smtp.Client, s Settings, l Lead) (ambiguous bool, err error)
 	if err = c.Mail(s.From); err != nil {
 		return false, fmt.Errorf("MAIL FROM: %w", err)
 	}
-	if err = c.Rcpt(l.Email); err != nil {
-		return false, fmt.Errorf("получатель отклонён: %w", err)
+	for _, email := range recipients(l) {
+		if err = c.Rcpt(email); err != nil {
+			return false, fmt.Errorf("получатель %s отклонён: %w", email, err)
+		}
 	}
 	w, err := c.Data()
 	if err != nil {

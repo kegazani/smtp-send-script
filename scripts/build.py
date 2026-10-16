@@ -18,15 +18,17 @@ def build(target):
     system,arch,label=target
     folder=DIST/f'MailDesk-{label}'
     folder.mkdir(parents=True,exist_ok=True)
+    package_files=[]
     if system=='darwin':
         contents=folder/'MailDesk.app'/'Contents'
         binary=contents/'MacOS'/'MailDesk'
         binary.parent.mkdir(parents=True,exist_ok=True)
-        info={'CFBundleExecutable':'MailDesk','CFBundleIdentifier':'local.maildesk.app','CFBundleName':'MailDesk','CFBundleDisplayName':'MailDesk','CFBundleShortVersionString':'1.0.0','CFBundleVersion':'1','CFBundlePackageType':'APPL','LSMinimumSystemVersion':'12.0'}
+        info={'CFBundleExecutable':'MailDesk','CFBundleIdentifier':'local.maildesk.app','CFBundleName':'MailDesk','CFBundleDisplayName':'MailDesk','CFBundleShortVersionString':'1.1.0','CFBundleVersion':'2','CFBundlePackageType':'APPL','LSMinimumSystemVersion':'12.0'}
         (contents/'Info.plist').write_bytes(plistlib.dumps(info))
         launcher=folder/'Запустить MailDesk.command'
         launcher.write_text('#!/bin/sh\ncd "$(dirname "$0")"\nexec ./MailDesk.app/Contents/MacOS/MailDesk\n')
         launcher.chmod(0o755)
+        package_files.extend([contents/'Info.plist',launcher])
     else:
         binary=folder/('MailDesk.exe' if system=='windows' else 'maildesk')
     environment=dict(os.environ,GOOS=system,GOARCH=arch,CGO_ENABLED='0',GOMAXPROCS='3')
@@ -34,10 +36,13 @@ def build(target):
     binary.chmod(0o755)
     shutil.copyfile(ROOT/'README.md',folder/'ИНСТРУКЦИЯ.md')
     (folder/'Пример.csv').write_text('Company,Email,Overview\nКомпания без описания,,\nКомпания с описанием,,Производство вентиляционного оборудования\n',encoding='utf-8-sig')
+    package_files.extend([binary,folder/'ИНСТРУКЦИЯ.md',folder/'Пример.csv'])
     archive=DIST/f'MailDesk-{label}.zip'
     with zipfile.ZipFile(archive,'w',zipfile.ZIP_DEFLATED) as z:
-        for file in sorted(folder.rglob('*')):
-            if file.is_file():z.write(file,Path(folder.name)/file.relative_to(folder))
+        # Only declared distribution files are published. Never sweep local
+        # credentials or user data left beside an unpacked application.
+        for file in sorted(package_files):
+            z.write(file,Path(folder.name)/file.relative_to(folder))
     print(f'Built {archive.name}',flush=True)
     return archive
 

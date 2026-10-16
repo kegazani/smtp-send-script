@@ -5,6 +5,8 @@ Run from repository root after building dist/maildesk:
 Requires developer-only Playwright and OpenSSL, not needed by end users.
 """
 import json
+from email import policy
+from email.parser import BytesParser
 import os
 from pathlib import Path
 import socketserver
@@ -113,22 +115,31 @@ def main():
                 expect(page.locator('#stat-total')).to_have_text('2')
                 page.locator('#select-all').check()
                 expect(page.locator('#selected-count')).to_have_text('1')
+                brochure=b'%PDF-1.4\nattachment-test\x00\xff'
+                page.locator('#bulk-attachment-input').set_input_files({'name':'Предложение.pdf','mimeType':'application/pdf','buffer':brochure})
+                expect(page.locator('#toast')).to_contain_text('Вложения сохранены')
                 page.locator('#generate-button').click()
                 expect(page.locator('.status-chip.ready')).to_have_count(1,timeout=10000)
                 page.locator('.lead-row').first.click()
                 expect(page.locator('#editor-form [name="body"]')).to_have_value('Здравствуйте!\nТестовое письмо для Тестовая компания.')
+                expect(page.locator('.attachment-item')).to_have_count(1)
+                with page.expect_download() as attachment_download:
+                    page.locator('.attachment-name').click()
+                downloaded=folder/'brochure.pdf';attachment_download.value.save_as(downloaded)
+                assert downloaded.read_bytes()==brochure
                 page.locator('#editor-form [name="body"]').fill('Здравствуйте!\nПроверенный вручную текст.')
                 expect(page.locator('#send-button')).to_be_disabled()
                 page.get_by_role('button',name='Сохранить письмо').click()
                 expect(page.locator('#send-button')).to_be_enabled()
 
                 def send_with_confirmations():
+                    before=len(server.messages)
                     page.locator('#send-button').click()
                     expect(page.locator('#confirm-title')).to_have_text('Подтвердите отправку')
-                    assert not server.messages
+                    assert len(server.messages)==before
                     page.locator('#confirm-next').click()
                     expect(page.locator('#confirm-title')).to_have_text('Точно подтверждаете?')
-                    assert not server.messages
+                    assert len(server.messages)==before
                     page.locator('#confirm-next').click()
 
                 send_with_confirmations()
@@ -147,23 +158,75 @@ def main():
                 expect(page.locator('#selected-count')).to_have_text('0')
                 assert len(server.messages)==1
                 assert f'To: {RECIPIENT}'.encode() in server.messages[0]
+                mail=BytesParser(policy=policy.default).parsebytes(server.messages[0])
+                attached=list(mail.iter_attachments())
+                assert len(attached)==1 and attached[0].get_filename()=='Предложение.pdf'
+                assert attached[0].get_payload(decode=True)==brochure
+
+                # Compose with several recipients; the server must enforce the
+                # test address on EVERY recipient before making an SMTP call.
+                page.locator('[data-page="compose"]').click()
+                page.locator('#compose-form [name="recipients"]').fill(RECIPIENT+'; second@example.test')
+                page.locator('#compose-form [name="subject"]').fill('Ручное письмо с файлами')
+                page.locator('#compose-form [name="body"]').fill('Здравствуйте!\nСоздано вручную.')
+                notes='Пример текстового вложения'.encode()
+                page.locator('#compose-attachment-input').set_input_files([
+                    {'name':'Предложение.pdf','mimeType':'application/pdf','buffer':brochure},
+                    {'name':'описание.txt','mimeType':'text/plain','buffer':notes}])
+                expect(page.locator('#compose-attachments .attachment-item')).to_have_count(2)
+                page.get_by_role('button',name='Сохранить черновик',exact=True).click()
+                expect(page.locator('#stat-total')).to_have_text('3')
+                expect(page.locator('#editor-form [name="recipients"]')).to_have_value(RECIPIENT+', second@example.test')
+                expect(page.locator('.attachment-item')).to_have_count(2)
+                page.locator('#send-button').click()
+                expect(page.locator('#toast')).to_contain_text('тестовый режим')
+                assert len(server.messages)==1
+                page.locator('#editor-form [name="recipients"]').fill(RECIPIENT)
+                page.get_by_role('button',name='Сохранить письмо',exact=True).click()
+                expect(page.locator('#toast')).to_have_text('Письмо сохранено')
+                page.get_by_role('button',name='Удалить описание.txt',exact=True).click()
+                expect(page.locator('.attachment-item')).to_have_count(1)
+                page.locator('#editor-attachment-input').set_input_files({'name':'описание.txt','mimeType':'text/plain','buffer':notes})
+                expect(page.locator('.attachment-item')).to_have_count(2)
+                screenshot_dir=os.environ.get('MAILDESK_SCREENSHOTS')
+                if screenshot_dir:
+                    screenshot_path=Path(screenshot_dir);screenshot_path.mkdir(parents=True,exist_ok=True)
+                    page.evaluate('window.scrollTo(0,0)')
+                    page.screenshot(path=str(screenshot_path/'manual-message.png'),full_page=True)
+                send_with_confirmations()
+                expect(page.locator('#stat-sent')).to_have_text('2',timeout=10000)
+                assert len(server.messages)==2
+                mail=BytesParser(policy=policy.default).parsebytes(server.messages[1])
+                attached=list(mail.iter_attachments())
+                assert len(attached)==2 and attached[1].get_filename()=='описание.txt'
+                assert attached[1].get_payload(decode=True)==notes
                 with page.expect_download() as download:
                     page.locator('#export-menu-button').click()
-                    page.get_by_text('Проект для переноса · JSON').click()
+                    page.get_by_text('Проект с вложениями · JSON').click()
                 export_file=folder/'project.json';download.value.save_as(export_file)
                 exported=json.loads(export_file.read_text())
                 assert exported['leads'][0]['status']=='sent'
+                assert exported['version']==2 and len(exported['files'])==2
+                assert len(exported['leads'][2]['attachments'])==2
                 assert 'test-only-password' not in export_file.read_text()
                 page.reload()
-                expect(page.locator('#stat-sent')).to_have_text('1')
+                expect(page.locator('#stat-sent')).to_have_text('2')
                 page.locator('#file-input').set_input_files(export_file)
                 expect(page.locator('#toast')).to_contain_text('Добавлено: 0')
-                expect(page.locator('#stat-sent')).to_have_text('1')
+                expect(page.locator('#stat-sent')).to_have_text('2')
                 page.set_viewport_size({'width':390,'height':844})
                 assert not page.evaluate('document.documentElement.scrollWidth > innerWidth')
+                page.locator('[data-page="compose"]').click()
+                page.locator('#compose-form [name="recipients"]').fill(RECIPIENT)
+                page.locator('#compose-form [name="subject"]').fill('Следующее письмо')
+                page.locator('#compose-form [name="body"]').fill('Только черновик — без отправки.')
+                page.locator('#compose-attachment-input').set_input_files({'name':'описание.txt','mimeType':'text/plain','buffer':notes})
+                assert not page.evaluate('document.documentElement.scrollWidth > innerWidth')
+                if screenshot_dir:
+                    page.screenshot(path=str(screenshot_path/'compose-mobile.png'),full_page=True)
                 assert not errors, errors
                 browser.close()
-            print('PASS: settings, TLS SMTP auth, CSV, template fallback, manual edit, both confirmations, rejection/red, retry, sent/gray, filters, export/import, persistence, mobile. One message accepted by local fixture; no external SMTP traffic.')
+            print('PASS: settings, TLS SMTP auth, CSV, template, bulk/company attachments, MIME bytes, manual compose, multiple recipients, test guard, attachment add/remove/download, both confirmations, rejection/retry/sent colors, filters, JSON file transfer, persistence, desktop/mobile. Two messages accepted by local fixture; no external SMTP traffic.')
         finally:
             process.terminate();process.wait(timeout=10);server.shutdown();server.server_close()
 

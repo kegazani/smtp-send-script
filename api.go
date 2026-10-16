@@ -45,13 +45,18 @@ func (a *App) state(w http.ResponseWriter, r *http.Request) {
 	s := a.cfg
 	s.Password = ""
 	s.APIKey = ""
-	respond(w, map[string]any{"project": a.w, "settings": s, "smtpReady": a.cfg.Password != "" && validEmail(a.cfg.Username), "deepseekReady": a.cfg.APIKey != "", "sending": a.sending, "generating": a.generating, "jobError": a.jobError, "testRecipient": a.testRecipient})
+	view := a.w
+	view.Files = nil
+	respond(w, map[string]any{"project": view, "settings": s, "smtpReady": a.cfg.Password != "" && validEmail(a.cfg.Username), "deepseekReady": a.cfg.APIKey != "", "sending": a.sending, "generating": a.generating, "jobError": a.jobError, "testRecipient": a.testRecipient})
 }
 
 func (a *App) importFile(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, 22*1024*1024)
+	r.Body = http.MaxBytesReader(w, r.Body, maxProjectJSON+(2<<20))
 	if err := r.ParseMultipartForm(1024 * 1024); err != nil {
-		fail(w, 400, errors.New("не удалось прочитать файл (максимум 20 МБ)"))
+		if r.MultipartForm != nil {
+			r.MultipartForm.RemoveAll()
+		}
+		fail(w, 400, errors.New("не удалось прочитать файл проекта (максимум 180 МБ)"))
 		return
 	}
 	defer r.MultipartForm.RemoveAll()
@@ -64,10 +69,19 @@ func (a *App) importFile(w http.ResponseWriter, r *http.Request) {
 	var leads []Lead
 	var imported Workspace
 	if strings.EqualFold(filepath.Ext(h.Filename), ".json") {
-		dec := json.NewDecoder(io.LimitReader(f, 20*1024*1024))
+		dec := json.NewDecoder(io.LimitReader(f, maxProjectJSON))
 		dec.DisallowUnknownFields()
-		if err = dec.Decode(&imported); err != nil || imported.Version != 1 || len(imported.Leads) > 10000 {
+		if err = dec.Decode(&imported); err != nil || (imported.Version != 1 && imported.Version != 2) || len(imported.Leads) > 20000 {
 			fail(w, 400, errors.New("неподдерживаемый файл проекта"))
+			return
+		}
+		var trailing any
+		if dec.Decode(&trailing) != io.EOF {
+			fail(w, 400, errors.New("лишние данные в проекте"))
+			return
+		}
+		if err = validateWorkspaceFiles(imported); err != nil {
+			fail(w, 400, err)
 			return
 		}
 		leads = imported.Leads
@@ -90,14 +104,28 @@ func (a *App) importFile(w http.ResponseWriter, r *http.Request) {
 		fail(w, 409, errors.New("дождитесь завершения текущей операции"))
 		return
 	}
-	if len(a.w.Leads)+len(leads) > 20000 {
-		fail(w, 400, errors.New("в одном проекте допускается до 20 000 компаний"))
+	keys := map[string]bool{}
+	for _, l := range a.w.Leads {
+		keys[identity(l)] = true
+	}
+	for _, l := range leads {
+		keys[identity(l)] = true
+	}
+	if len(keys) > 20000 {
+		fail(w, 400, errors.New("в одном проекте допускается до 20 000 писем и компаний"))
 		return
 	}
 	added, skipped := 0, 0
+	files := combinedFiles(a.w.Files, imported.Files)
+	if err = validateWorkspaceFiles(Workspace{Files: files}); err != nil {
+		fail(w, 400, err)
+		return
+	}
 	err = a.commit(func() {
+		a.w.Files = files
 		added, skipped = a.merge(leads, imported.Sent)
-		if imported.Version == 1 {
+		a.collectFiles()
+		if imported.Version == 1 || imported.Version == 2 {
 			a.w.Template = imported.Template
 		}
 	})
@@ -116,9 +144,13 @@ func (a *App) export(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Disposition", `attachment; filename="maildesk-report.csv"`)
 		_, _ = io.WriteString(w, "\ufeff")
 		c := csv.NewWriter(w)
-		_ = c.Write([]string{"Company", "Email", "Website", "City", "Industry", "Overview", "Subject", "Body", "Status", "Error", "Sent at", "Message-ID"})
+		_ = c.Write([]string{"Company", "Email", "Website", "City", "Industry", "Overview", "Subject", "Body", "Status", "Error", "Sent at", "Message-ID", "Kind", "Attachments"})
 		for _, l := range a.w.Leads {
-			row := []string{l.Company, l.Email, l.Website, l.City, l.Industry, l.Description, l.Subject, l.Body, l.Status, l.Error, l.SentAt, l.MessageID}
+			names := []string{}
+			for _, f := range l.Attachments {
+				names = append(names, f.Name)
+			}
+			row := []string{l.Company, strings.Join(recipients(l), ", "), l.Website, l.City, l.Industry, l.Description, l.Subject, l.Body, l.Status, l.Error, l.SentAt, l.MessageID, l.Kind, strings.Join(names, "; ")}
 			for i, s := range row {
 				if strings.HasPrefix(s, "=") || strings.HasPrefix(s, "+") || strings.HasPrefix(s, "-") || strings.HasPrefix(s, "@") {
 					row[i] = "'" + s
@@ -202,16 +234,17 @@ func (a *App) smtpTest(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) updateLead(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		ID      string `json:"id"`
-		Company string `json:"company"`
-		Email   string `json:"email"`
-		Subject string `json:"subject"`
-		Body    string `json:"body"`
+		ID         string   `json:"id"`
+		Company    string   `json:"company"`
+		Email      string   `json:"email"`
+		Subject    string   `json:"subject"`
+		Body       string   `json:"body"`
+		Recipients []string `json:"recipients"`
 	}
 	if !decode(w, r, &in) {
 		return
 	}
-	if strings.TrimSpace(in.Company) == "" || strings.ContainsAny(in.Subject, "\r\n") || len(in.Subject) > 1000 || len(in.Body) > 50000 {
+	if strings.ContainsAny(in.Subject, "\r\n") || len(in.Subject) > 1000 || len(in.Body) > 50000 {
 		fail(w, 400, errors.New("проверьте название, тему и длину письма"))
 		return
 	}
@@ -227,13 +260,30 @@ func (a *App) updateLead(w http.ResponseWriter, r *http.Request) {
 				fail(w, 409, errors.New("отправленное письмо нельзя изменить"))
 				return
 			}
+			var to []string
+			if l.Kind == "message" {
+				var err error
+				to, err = normalizeRecipients(in.Recipients)
+				if err != nil {
+					fail(w, 400, err)
+					return
+				}
+				in.Company = strings.TrimSpace(in.Subject)
+				if in.Company == "" {
+					in.Company = "Новое письмо"
+				}
+				in.Email = to[0]
+			} else if strings.TrimSpace(in.Company) == "" {
+				fail(w, 400, errors.New("укажите компанию"))
+				return
+			}
 			for _, other := range a.w.Leads {
-				if other.ID != l.ID && validEmail(in.Email) && emailKey(other.Email) == emailKey(in.Email) {
+				if l.Kind != "message" && other.Kind != "message" && other.ID != l.ID && validEmail(in.Email) && emailKey(other.Email) == emailKey(in.Email) {
 					fail(w, 409, errors.New("такой адрес уже есть в проекте"))
 					return
 				}
 			}
-			if _, ok := a.w.Sent[emailKey(in.Email)]; ok {
+			if _, ok := a.w.Sent[emailKey(in.Email)]; ok && l.Kind != "message" {
 				fail(w, 409, errors.New("на этот адрес уже отправлено письмо"))
 				return
 			}
@@ -241,6 +291,9 @@ func (a *App) updateLead(w http.ResponseWriter, r *http.Request) {
 				p := &a.w.Leads[i]
 				p.Company = strings.TrimSpace(in.Company)
 				p.Email = strings.TrimSpace(in.Email)
+				if l.Kind == "message" {
+					p.Recipients = to
+				}
 				p.Subject = strings.TrimSpace(in.Subject)
 				p.Body = strings.TrimSpace(in.Body)
 			})
@@ -304,11 +357,17 @@ func (a *App) findSelected(ids []string, drafts bool) ([]Lead, error) {
 		if !selectable(l) {
 			return nil, fmt.Errorf("%s: адрес отсутствует, письмо отправлено или требует проверки", l.Company)
 		}
-		if _, ok := a.w.Sent[emailKey(l.Email)]; ok {
+		if _, ok := a.w.Sent[emailKey(l.Email)]; ok && l.Kind != "message" {
 			return nil, errors.New("на выбранный адрес уже отправлено письмо")
 		}
 		if drafts && (l.Subject == "" || l.Body == "" || strings.ContainsAny(l.Subject, "\r\n")) {
 			return nil, fmt.Errorf("%s: сначала подготовьте и проверьте письмо", l.Company)
+		}
+		if drafts {
+			if err := validateAttachments(l, a.w.Files); err != nil {
+				return nil, err
+			}
+			l.files = a.w.Files
 		}
 		leads = append(leads, l)
 	}
@@ -335,6 +394,12 @@ func (a *App) generateDrafts(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		fail(w, 400, err)
 		return
+	}
+	for _, l := range leads {
+		if l.Kind == "message" {
+			fail(w, 400, errors.New("обычные письма редактируются вручную; генерация доступна для компаний"))
+			return
+		}
 	}
 	a.generating = true
 	a.stop = false
@@ -423,7 +488,7 @@ func (a *App) prepare(w http.ResponseWriter, r *http.Request) {
 	}
 	if a.testRecipient != "" {
 		for _, l := range leads {
-			if emailKey(l.Email) != emailKey(a.testRecipient) {
+			if !a.testRecipientAllowed(l) {
 				fail(w, 403, fmt.Errorf("тестовый режим: отправка разрешена только на %s", a.testRecipient))
 				return
 			}
@@ -481,6 +546,7 @@ func (a *App) confirmationStep(w http.ResponseWriter, r *http.Request, stage int
 	for i, l := range leads {
 		for _, p := range a.w.Leads {
 			if p.ID == l.ID {
+				p.files = l.files
 				leads[i] = p
 			}
 		}
@@ -516,7 +582,7 @@ func (a *App) runSend(s Settings, leads []Lead) {
 		}
 		var ambiguous bool
 		var err error
-		if a.testRecipient != "" && emailKey(l.Email) != emailKey(a.testRecipient) {
+		if !a.testRecipientAllowed(l) {
 			err = errors.New("тестовый режим запрещает этого получателя")
 		} else {
 			ambiguous, err = a.deliver(s, l)
@@ -531,7 +597,9 @@ func (a *App) runSend(s Settings, leads []Lead) {
 				if err == nil {
 					p.Status = "sent"
 					p.SentAt = time.Now().UTC().Format(time.RFC3339)
-					a.w.Sent[emailKey(p.Email)] = p.SentAt
+					if p.Kind != "message" {
+						a.w.Sent[emailKey(p.Email)] = p.SentAt
+					}
 				} else if ambiguous {
 					p.Status = "unknown"
 				} else {
@@ -568,6 +636,10 @@ func (a *App) routes() *http.ServeMux {
 	m.HandleFunc("POST /api/settings", a.settings)
 	m.HandleFunc("POST /api/smtp-test", a.smtpTest)
 	m.HandleFunc("POST /api/lead", a.updateLead)
+	m.HandleFunc("POST /api/message", a.createMessage)
+	m.HandleFunc("POST /api/attachments", a.addAttachments)
+	m.HandleFunc("POST /api/attachments/remove", a.removeAttachment)
+	m.HandleFunc("GET /api/attachment", a.downloadAttachment)
 	m.HandleFunc("POST /api/resolve", a.resolve)
 	m.HandleFunc("POST /api/generate", a.generateDrafts)
 	m.HandleFunc("POST /api/prepare", a.prepare)
