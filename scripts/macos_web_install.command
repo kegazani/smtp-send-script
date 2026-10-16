@@ -64,6 +64,9 @@ fi
 
 printf 'MailDesk — установка и обновление веб-версии\n'
 maildesk_source="$maildesk_here/MailDesk.app"
+if [ "$(basename "$0")" = 'Обновить MailDesk.command' ]; then
+    maildesk_source=''
+fi
 if [ -n "$maildesk_archive" ] || [ ! -d "$maildesk_source" ]; then
     if [ -z "$maildesk_archive" ]; then
         maildesk_archive=$(/usr/bin/osascript -e 'POSIX path of (choose file of type {"public.zip-archive"} with prompt "Выберите новый Mac ZIP веб-версии MailDesk")') || exit 1

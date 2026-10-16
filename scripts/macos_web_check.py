@@ -45,7 +45,7 @@ def smoke(archive, report_path=None):
 
     def command(args, success=True, timeout=60):
         result = subprocess.run(args, input='\n', text=True, env=environment,
-            capture_output=True, timeout=timeout)
+            encoding='utf-8', errors='backslashreplace', capture_output=True, timeout=timeout)
         if (result.returncode == 0) != success:
             failure(result.stdout + '\n' + result.stderr)
             raise AssertionError(f'Unexpected installer status: {result.returncode}')
