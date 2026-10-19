@@ -47,7 +47,7 @@ func (a *App) state(w http.ResponseWriter, r *http.Request) {
 	s.APIKey = ""
 	view := a.w
 	view.Files = nil
-	respond(w, map[string]any{"version": appVersion, "project": view, "settings": s, "smtpReady": a.cfg.Password != "" && validEmail(a.cfg.Username), "deepseekReady": a.cfg.APIKey != "", "sending": a.sending, "generating": a.generating, "jobError": a.jobError, "testRecipient": a.testRecipient, "generation": a.lastGeneration})
+	respond(w, map[string]any{"version": appVersion, "project": view, "settings": s, "smtpReady": a.cfg.Password != "" && validateSettings(a.cfg) == nil, "smtpPasswordSaved": a.cfg.Password != "", "deepseekReady": a.cfg.APIKey != "", "sending": a.sending, "generating": a.generating, "jobError": a.jobError, "testRecipient": a.testRecipient, "generation": a.lastGeneration})
 }
 
 func (a *App) importFile(w http.ResponseWriter, r *http.Request) {
@@ -187,16 +187,22 @@ func (a *App) template(w http.ResponseWriter, r *http.Request) {
 	respond(w, map[string]bool{"ok": true})
 }
 
-func (a *App) settings(w http.ResponseWriter, r *http.Request) {
-	var s Settings
-	if !decode(w, r, &s) {
-		return
-	}
+func resolveSettings(s, saved Settings) Settings {
 	s.Host = strings.TrimSpace(s.Host)
 	s.Username = strings.TrimSpace(s.Username)
 	s.From = strings.TrimSpace(s.From)
-	if err := validateSettings(s); err != nil {
-		fail(w, 400, err)
+	if s.Password == "" {
+		s.Password = saved.Password
+	}
+	if s.APIKey == "" {
+		s.APIKey = saved.APIKey
+	}
+	return s
+}
+
+func (a *App) settings(w http.ResponseWriter, r *http.Request) {
+	var s Settings
+	if !decode(w, r, &s) {
 		return
 	}
 	a.mu.Lock()
@@ -205,11 +211,10 @@ func (a *App) settings(w http.ResponseWriter, r *http.Request) {
 		fail(w, 409, errors.New("дождитесь завершения операции"))
 		return
 	}
-	if s.Password == "" {
-		s.Password = a.cfg.Password
-	}
-	if s.APIKey == "" {
-		s.APIKey = a.cfg.APIKey
+	s = resolveSettings(s, a.cfg)
+	if err := validateSettings(s); err != nil {
+		fail(w, 400, err)
+		return
 	}
 	if err := atomicJSON(filepath.Join(a.dir, "credentials.json"), s); err != nil {
 		fail(w, 500, err)
@@ -220,9 +225,18 @@ func (a *App) settings(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) smtpTest(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Settings *Settings `json:"settings"`
+	}
+	if !decode(w, r, &in) {
+		return
+	}
 	a.mu.Lock()
 	s := a.cfg
 	a.mu.Unlock()
+	if in.Settings != nil {
+		s = resolveSettings(*in.Settings, s)
+	}
 	c, err := smtpConnect(s, nil)
 	if err != nil {
 		fail(w, 400, errors.New(cleanError(err, s)))
@@ -501,7 +515,7 @@ func (a *App) prepare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if a.cfg.Password == "" {
-		fail(w, 400, errors.New("добавьте SMTP-пароль"))
+		fail(w, 400, errors.New("SMTP-пароль не сохранён: откройте «Подключения», введите пароль приложения и нажмите «Сохранить подключения»"))
 		return
 	}
 	leads, err := a.findSelected(in.IDs, true)

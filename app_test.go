@@ -282,6 +282,79 @@ func TestLocalOnlyAPIAndSecretRedaction(t *testing.T) {
 	}
 }
 
+func TestSettingsKeepSavedSecretsAcrossBlankSaveAndRestart(t *testing.T) {
+	t.Setenv("SMTP_PASSWORD", "")
+	t.Setenv("LLM_API_KEY", "")
+	a := newTestApp(t)
+	if code, _ := call(t, a, "settings", a.cfg); code != 200 {
+		t.Fatal("initial settings save failed")
+	}
+	draft := a.cfg
+	draft.Password, draft.APIKey = "", ""
+	draft.SenderName = "Новое имя отправителя"
+	if code, _ := call(t, a, "settings", draft); code != 200 {
+		t.Fatal("blank secret fields must preserve saved credentials")
+	}
+	reopened, err := openApp(a.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reopened.cfg.Password != "test-password" || reopened.cfg.APIKey != "test-key" || reopened.cfg.SenderName != draft.SenderName {
+		t.Fatal("saved credentials or settings lost after restart")
+	}
+	w := httptest.NewRecorder()
+	reopened.state(w, httptest.NewRequest("GET", "/api/state", nil))
+	var state map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &state); err != nil {
+		t.Fatal(err)
+	}
+	if state["smtpPasswordSaved"] != true || state["smtpReady"] != true {
+		t.Fatal("state must distinguish a saved password from an empty input")
+	}
+	if strings.Contains(w.Body.String(), "test-password") || strings.Contains(w.Body.String(), "test-key") {
+		t.Fatal("saved secret leaked in state")
+	}
+	reopened.cfg.From = "invalid"
+	w = httptest.NewRecorder()
+	reopened.state(w, httptest.NewRequest("GET", "/api/state", nil))
+	if err := json.Unmarshal(w.Body.Bytes(), &state); err != nil || state["smtpReady"] != false || state["smtpPasswordSaved"] != true {
+		t.Fatal("SMTP readiness must not confuse invalid addresses with a missing password")
+	}
+}
+
+func TestMissingSMTPPasswordIsExplicitAndDraftCheckDoesNotSave(t *testing.T) {
+	a := newTestApp(t)
+	a.cfg.Password = ""
+	if code, _ := call(t, a, "settings", a.cfg); code != 200 {
+		t.Fatal("settings without a password may be saved for later completion")
+	}
+	before, err := os.ReadFile(filepath.Join(a.dir, "credentials.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, result := call(t, a, "prepare", map[string]any{"ids": []string{"one"}})
+	if code != 400 || !strings.Contains(result["error"].(string), "Сохранить подключения") {
+		t.Fatal("missing password must explain how to save it")
+	}
+	for _, draft := range []any{map[string]any{}, map[string]any{"settings": a.cfg}} {
+		code, result = call(t, a, "smtp-test", draft)
+		if code != 400 || !strings.Contains(result["error"].(string), "SMTP-пароль") {
+			t.Fatal("empty password must fail before any connection")
+		}
+	}
+	draft := a.cfg
+	draft.Password = "draft-only-password"
+	draft.Host = "invalid/host" // Fails validation without contacting any SMTP server.
+	code, _ = call(t, a, "smtp-test", map[string]any{"settings": draft})
+	if code != 400 {
+		t.Fatal("invalid draft settings accepted")
+	}
+	after, err := os.ReadFile(filepath.Join(a.dir, "credentials.json"))
+	if err != nil || !bytes.Equal(before, after) || a.cfg.Password != "" {
+		t.Fatal("testing a draft must not persist credentials")
+	}
+}
+
 // A local TLS SMTP fixture validates AUTH, the recipient and the MIME body.
 func TestSMTPSubmissionAndRejection(t *testing.T) {
 	certServer := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))

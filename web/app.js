@@ -136,16 +136,32 @@ async function uploadAttachments(ids, files) {
   uploading=true; renderControls();
   try {const result=await request('attachments',form);toast(`Вложения сохранены. Обновлено писем: ${result.updated}.`);} finally {uploading=false;await refresh(true);}
 }
+function settingsData() {
+  const data = Object.fromEntries(new FormData($('#settings-form')));
+  data.port = Number(data.port);
+  return data;
+}
+function settingsDirty() {
+  return page === 'settings' && state && Object.entries(settingsData()).some(([key,value]) => value !== (state.settings[key] ?? ''));
+}
+function unsavedChanges() { return editorDirty || formDirty || settingsDirty(); }
+function renderConnectionStatus() {
+  const password = $('#settings-form').elements.password;
+  password.placeholder = state.smtpPasswordSaved ? 'Оставьте пустым, чтобы сохранить текущий' : 'Введите пароль приложения Mail.ru';
+  $('#smtp-password-status').textContent = password.value ? 'Введён новый пароль. Нажмите «Сохранить подключения», чтобы использовать его при отправке.' : state.smtpPasswordSaved ? 'Пароль сохранён на этом компьютере. Поле оставлено пустым; повторно вводить пароль не нужно.' : 'Пароль ещё не сохранён. Введите его и нажмите «Сохранить подключения».';
+  $('#smtp-status').textContent = settingsDirty() ? 'Не сохранено' : state.smtpReady ? 'Данные сохранены' : 'Нужны данные';
+  $('#deepseek-status').textContent = state.deepseekReady ? 'Ключ сохранён' : 'Нужен ключ';
+}
 function fillForms() {
   for (const key of ['subject','body','instructions','senderProfile']) $('#template-form').elements[key].value = state.project.template[key] || '';
   for (const [key,value] of Object.entries(state.settings)) if ($('#settings-form').elements[key]) $('#settings-form').elements[key].value = value;
   $('#settings-form').elements.password.value = ''; $('#settings-form').elements.apiKey.value = '';
-  $('#smtp-status').textContent = state.smtpReady ? 'Данные сохранены' : 'Нужны данные';
-  $('#deepseek-status').textContent = state.deepseekReady ? 'Ключ сохранён' : 'Нужен ключ';
+  renderConnectionStatus();
 }
 async function refresh(editor = false) {
   const wasBusy = busy(), before = leadByID(activeID);
   state = await request('state');
+  renderConnectionStatus();
   selected = new Set([...selected].filter(id => {const l=leadByID(id); return l && (selectable(l) || l.status === 'sending');}));
   renderList();
   const after = leadByID(activeID);
@@ -155,7 +171,7 @@ async function refresh(editor = false) {
 }
 async function navigate(next) {
   if (next === page) return;
-  if ((editorDirty || formDirty) && !window.confirm('Изменения не сохранены. Перейти без сохранения?')) return;
+  if (unsavedChanges() && !window.confirm('Изменения не сохранены. Перейти без сохранения?')) return;
   if (page==='compose' && formDirty) {$('#compose-form').reset();composeFiles=[];renderComposeFiles();}
   editorDirty=false;formDirty=false;page=next;
   $$('.page').forEach(el => el.hidden = el.id !== `page-${page}`);
@@ -193,7 +209,7 @@ $('#lead-list').addEventListener('click',e=>{
   activeID=row.dataset.id;renderList();renderEditor();
 });
 $('#lead-list').addEventListener('keydown',e=>{if((e.key==='Enter'||e.key===' ')&&e.target.matches('.lead-row')){e.preventDefault();e.target.click();}});
-$('#import-button').addEventListener('click',()=>{if(editorDirty||formDirty){toast('Сначала сохраните изменения',true);return;}$('#file-input').click();});
+$('#import-button').addEventListener('click',()=>{if(unsavedChanges()){toast('Сначала сохраните изменения',true);return;}$('#file-input').click();});
 $('#file-input').addEventListener('change',e=>action(async()=>{
   const file=e.target.files[0];if(!file)return;
   try{const form=new FormData();form.append('file',file);$('#import-button').disabled=true;const result=await request('import',form);await refresh(true);fillForms();toast(`Добавлено: ${result.added}. Уже были в проекте: ${result.skipped}.`);}finally{e.target.value='';$('#import-button').disabled=busy();}
@@ -229,13 +245,14 @@ $('#compose-form').addEventListener('submit',e=>{
   });
 });
 $('#template-form').addEventListener('input',()=>formDirty=true);
-$('#settings-form').addEventListener('input',()=>formDirty=true);
+for (const event of ['input','change']) $('#settings-form').addEventListener(event,()=>{formDirty=true;$('#connection-result').textContent='';renderConnectionStatus();});
 $('#template-form').addEventListener('submit',e=>{e.preventDefault();action(async()=>{await request('template',Object.fromEntries(new FormData(e.target)));formDirty=false;await refresh();fillForms();toast('Шаблон сохранён');});});
-$('#settings-form').addEventListener('submit',e=>{e.preventDefault();action(async()=>{const data=Object.fromEntries(new FormData(e.target));data.port=Number(data.port);await request('settings',data);formDirty=false;await refresh();fillForms();toast('Подключения сохранены');});});
+$('#settings-form').addEventListener('submit',e=>{e.preventDefault();action(async()=>{await request('settings',settingsData());formDirty=false;await refresh();fillForms();$('#connection-result').textContent='';toast('Подключения сохранены');});});
 $('#smtp-test').addEventListener('click',()=>action(async()=>{
-  if(formDirty){toast('Сначала сохраните подключения',true);return;}
+  if(!$('#settings-form').reportValidity())return;
+  renderConnectionStatus();
   const button=$('#smtp-test');button.disabled=true;$('#connection-result').textContent='Проверяем соединение и авторизацию…';
-  try{const result=await request('smtp-test',{});$('#connection-result').textContent=result.message;toast('SMTP проверен, письма не отправлялись');}catch(e){$('#connection-result').textContent=e.message;throw e;}finally{button.disabled=false;}
+  try{const result=await request('smtp-test',{settings:settingsData()});$('#connection-result').textContent=result.message+(settingsDirty()?' Настройки ещё не сохранены. Нажмите «Сохранить подключения» перед отправкой.':'');toast('SMTP проверен, письма не отправлялись');}catch(e){$('#connection-result').textContent=e.message;throw e;}finally{button.disabled=false;}
 }));
 $('#send-button').addEventListener('click',()=>action(()=>beginSend([...selected])));
 $('#confirm-next').addEventListener('click',()=>action(async()=>{
@@ -248,5 +265,5 @@ $('#confirm-next').addEventListener('click',()=>action(async()=>{
 $('#confirm-dialog').addEventListener('close',()=>{currentToken='';confirmStage=0;});
 $('#stop-button').addEventListener('click',()=>action(async()=>{await request('stop',{});toast('Очередь остановится после текущего запроса');}));
 $('#quit-button').addEventListener('click',()=>action(async()=>{if(!window.confirm('Завершить работу MailDesk? Сохранённые данные останутся на компьютере.'))return;await request('quit',{});clearTimeout(pollTimer);toast('MailDesk завершён. Для продолжения запустите приложение снова.');$$('button').forEach(b=>b.disabled=true);}));
-window.addEventListener('beforeunload',e=>{if(editorDirty||formDirty){e.preventDefault();e.returnValue='';}});
+window.addEventListener('beforeunload',e=>{if(unsavedChanges()){e.preventDefault();e.returnValue='';}});
 action(async()=>{await refresh();fillForms();renderComposeFiles();});

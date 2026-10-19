@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-const appVersion = "1.1.3"
+const appVersion = "1.1.4"
 
 type runningState struct {
 	Version       string `json:"version"`

@@ -32,7 +32,7 @@ def smoke(archive, report_path=None):
         headers = {'Cookie':'maildesk=' + instance['session'], 'Origin':origin}
         with client.open(urllib.request.Request(origin + '/api/state', headers=headers), timeout=3) as response:
             result = json.load(response)
-        assert result['version'] == '1.1.3'
+        assert result['version'] == '1.1.4'
         assert result['testRecipient'] == 'ddkritsin@gmail.com'
         return result, origin, headers
 
@@ -82,7 +82,7 @@ def smoke(archive, report_path=None):
             result = command(['/bin/sh', str(installer)] + install_args)
             first, _, _ = state(profile)
             assert first['project']['leads'] == []
-            assert 'MailDesk 1.1.3 установлен' in result.stdout
+            assert 'MailDesk 1.1.4 установлен' in result.stdout
             assert subprocess.run(['xattr', '-p', 'com.apple.quarantine', str(installed)], capture_output=True).returncode != 0
             assert subprocess.run(['xattr', '-p', 'com.apple.quarantine', str(source)], capture_output=True).returncode == 0
             subprocess.run(['codesign', '--verify', '--deep', '--strict', str(installed)], check=True)

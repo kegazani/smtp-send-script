@@ -25,7 +25,7 @@ def seal_archive(archive):
         info = plistlib.loads(info_path.read_bytes())
         # Distinct application identities keep Launch Services from confusing
         # the background web server with the native GPUI window.
-        info.update(CFBundleIdentifier='local.maildesk.web', CFBundleVersion='6',
+        info.update(CFBundleIdentifier='local.maildesk.web', CFBundleVersion='7',
                     CFBundleInfoDictionaryVersion='6.0', CFBundleIconFile='MailDesk.icns', LSUIElement=True)
         info_path.write_bytes(plistlib.dumps(info))
         icon = contents / 'Resources/MailDesk.icns'

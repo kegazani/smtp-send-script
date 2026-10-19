@@ -4,6 +4,7 @@ Run from repository root after building dist/maildesk:
     python3 scripts/browser_smoke.py
 Requires developer-only Playwright and OpenSSL, not needed by end users.
 """
+import base64
 import json
 from email import policy
 from email.parser import BytesParser
@@ -30,7 +31,8 @@ class SMTPHandler(socketserver.StreamRequestHandler):
             if command.startswith('EHLO'):
                 reply = b'250-local-fixture\r\n250 AUTH PLAIN\r\n'
             elif command.startswith('AUTH'):
-                reply = b'235 authenticated\r\n'
+                credentials = base64.b64decode(command.split()[-1])
+                reply = b'235 authenticated\r\n' if credentials == b'\0sender@example.com\0test-only-password' else b'535 bad fixture credentials\r\n'
             elif command.startswith('MAIL'):
                 reply = b'250 accepted\r\n'
             elif command.startswith('RCPT'):
@@ -89,7 +91,8 @@ def main():
         # Fixture runs must not inherit personal provider credentials.
         for name in ('LLM_API_KEY','SMTP_USERNAME','SMTP_FROM_EMAIL','SMTP_PASSWORD'):
             environment.pop(name,None)
-        process = subprocess.Popen([str(ROOT/'dist/maildesk'),'--no-browser','--port','0','--data-dir',str(data_dir),'--test-recipient',RECIPIENT],env=environment,stdout=subprocess.DEVNULL)
+        command = [str(ROOT/'dist/maildesk'),'--no-browser','--port','0','--data-dir',str(data_dir),'--test-recipient',RECIPIENT]
+        process = subprocess.Popen(command,env=environment,stdout=subprocess.DEVNULL)
         try:
             info = wait_instance(data_dir,process)
             with sync_playwright() as playwright:
@@ -100,10 +103,48 @@ def main():
                 page.goto(f"http://127.0.0.1:{info['port']}/?session={info['session']}")
                 page.locator('[data-page="settings"]').click()
                 form = page.locator('#settings-form')
-                for name,value in {'host':'127.0.0.1','port':str(server.server_address[1]),'username':'sender@example.com','from':'sender@example.com','password':'test-only-password','senderName':'Тестовая команда'}.items():
+                for name,value in {'host':'127.0.0.1','port':str(server.server_address[1]),'username':'sender@example.com','from':'sender@example.com','senderName':'Тестовая команда'}.items():
                     form.locator(f'[name="{name}"]').fill(value)
                 form.get_by_role('button',name='Сохранить подключения').click()
+                expect(page.locator('#smtp-password-status')).to_contain_text('Пароль ещё не сохранён')
+                # Simulate password-manager autofill without an input event.
+                form.locator('[name="password"]').evaluate("input => { input.value = 'test-only-password'; }")
+                dialogs = []
+                def keep_settings(dialog):
+                    dialogs.append(dialog.message)
+                    dialog.dismiss()
+                page.once('dialog',keep_settings)
+                page.locator('[data-page="campaign"]').click()
+                expect(page.locator('#page-settings')).to_be_visible()
+                assert dialogs and 'не сохранены' in dialogs[0]
+                page.locator('#smtp-test').click()
+                expect(page.locator('#connection-result')).to_contain_text('авторизация работают',timeout=10000)
+                expect(page.locator('#connection-result')).to_contain_text('Настройки ещё не сохранены')
+                assert not json.loads((data_dir/'credentials.json').read_text()).get('password')
+                assert not server.messages
+                form.get_by_role('button',name='Сохранить подключения').click()
                 expect(page.locator('#smtp-status')).to_have_text('Данные сохранены')
+                expect(form.locator('[name="password"]')).to_have_value('')
+                expect(page.locator('#smtp-password-status')).to_contain_text('Пароль сохранён на этом компьютере')
+                # A changed visible password must be tested instead of the saved one.
+                form.locator('[name="password"]').fill('wrong-fixture-password')
+                page.locator('#smtp-test').click()
+                expect(page.locator('#connection-result')).to_contain_text('535',timeout=10000)
+                assert json.loads((data_dir/'credentials.json').read_text())['password']=='test-only-password'
+                form.locator('[name="password"]').fill('')
+                form.locator('[name="senderName"]').fill('Тестовая команда после сохранения')
+                form.get_by_role('button',name='Сохранить подключения').click()
+                expect(page.locator('#toast')).to_have_text('Подключения сохранены')
+                # Restart the real server; empty fields must keep persisted secrets.
+                process.terminate();process.wait(timeout=10)
+                (data_dir/'instance.json').unlink(missing_ok=True)
+                process = subprocess.Popen(command,env=environment,stdout=subprocess.DEVNULL)
+                info = wait_instance(data_dir,process)
+                page.goto(f"http://127.0.0.1:{info['port']}/?session={info['session']}")
+                page.locator('[data-page="settings"]').click()
+                expect(form.locator('[name="password"]')).to_have_value('')
+                expect(page.locator('#smtp-password-status')).to_contain_text('Пароль сохранён на этом компьютере')
+                expect(form.locator('[name="senderName"]')).to_have_value('Тестовая команда после сохранения')
                 page.locator('#smtp-test').click()
                 expect(page.locator('#connection-result')).to_contain_text('авторизация работают',timeout=10000)
                 assert not server.messages
@@ -245,7 +286,7 @@ def main():
                     page.screenshot(path=str(screenshot_path/'compose-mobile.png'),full_page=True)
                 assert not errors, errors
                 browser.close()
-            print('PASS: settings, TLS SMTP auth, CSV, template, bulk/company attachments, MIME bytes, manual compose, multiple recipients, test guard, attachment add/remove/download, both confirmations, rejection/retry/sent colors, filters, JSON file transfer, persistence, desktop/mobile. Two messages accepted by local fixture; no external SMTP traffic.')
+            print('PASS: password autofill without input events, unsaved navigation guard, draft SMTP auth without saving, wrong draft password rejection, blank-secret saves, credential persistence across server restart, saved-password hint, TLS SMTP auth, CSV, template, bulk/company attachments, MIME bytes, manual compose, multiple recipients, test guard, attachment add/remove/download, both confirmations, rejection/retry/sent colors, filters, JSON file transfer, desktop/mobile. Two messages accepted by local fixture; no external SMTP traffic.')
         finally:
             process.terminate();process.wait(timeout=10);server.shutdown();server.server_close()
 
