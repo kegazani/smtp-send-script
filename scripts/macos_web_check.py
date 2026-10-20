@@ -32,7 +32,7 @@ def smoke(archive, report_path=None):
         headers = {'Cookie':'maildesk=' + instance['session'], 'Origin':origin}
         with client.open(urllib.request.Request(origin + '/api/state', headers=headers), timeout=3) as response:
             result = json.load(response)
-        assert result['version'] == '1.1.4'
+        assert result['version'] == '1.1.5'
         assert result['testRecipient'] == 'ddkritsin@gmail.com'
         return result, origin, headers
 
@@ -82,7 +82,7 @@ def smoke(archive, report_path=None):
             result = command(['/bin/sh', str(installer)] + install_args)
             first, _, _ = state(profile)
             assert first['project']['leads'] == []
-            assert 'MailDesk 1.1.4 установлен' in result.stdout
+            assert 'MailDesk 1.1.5 установлен' in result.stdout
             assert subprocess.run(['xattr', '-p', 'com.apple.quarantine', str(installed)], capture_output=True).returncode != 0
             assert subprocess.run(['xattr', '-p', 'com.apple.quarantine', str(source)], capture_output=True).returncode == 0
             subprocess.run(['codesign', '--verify', '--deep', '--strict', str(installed)], check=True)
@@ -100,6 +100,22 @@ def smoke(archive, report_path=None):
             lead = current['project']['leads'][0]
             post(profile, '/api/lead', json.dumps({'id':lead['id'], 'company':lead['company'],
                 'email':lead['email'], 'subject':'Сохранённый черновик', 'body':'Не отправлять: локальный тест.'}).encode())
+            # Import a synthetic sent record, then use the real restore API.
+            # No SMTP connection is made; restored state must survive the update.
+            current, _, _ = state(profile)
+            sent_project = current['project']
+            sent_project['leads'][0].update(status='sent', sentAt='2026-10-19T12:00:00Z', messageId='installer-fixture@example.test')
+            sent_project['sent'] = {lead['email']:'2026-10-19T12:00:00Z'}
+            body = (b'--fixture\r\nContent-Disposition: form-data; name="file"; filename="sent.json"\r\n'
+                b'Content-Type: application/json\r\n\r\n' + json.dumps(sent_project).encode() + b'\r\n--fixture--\r\n')
+            post(profile, '/api/import', body, 'multipart/form-data; boundary=fixture')
+            post(profile, '/api/restore', json.dumps({'id':lead['id']}).encode())
+            current, _, _ = state(profile)
+            restored = current['project']['leads'][0]
+            assert restored['status'] == 'pending' and restored['resend']['email'] == lead['email']
+            assert restored['sendHistory'][0]['messageId'] == 'installer-fixture@example.test'
+            assert restored['body'] == 'Не отправлять: локальный тест.'
+            passed('Sent-message restore: synthetic accepted delivery returned to pending with its draft and delivery history intact; no SMTP connection.')
             saved_project = json.loads((profile / 'project.json').read_text())
             saved_credentials = (profile / 'credentials.json').read_bytes()
 

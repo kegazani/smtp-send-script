@@ -23,20 +23,56 @@ type Lead struct {
 	Recipients      []string     `json:"recipients,omitempty"`
 	Attachments     []Attachment `json:"attachments,omitempty"`
 	files           map[string][]byte
-	Company         string `json:"company"`
-	Email           string `json:"email"`
-	Website         string `json:"website"`
-	City            string `json:"city"`
-	Industry        string `json:"industry"`
-	Description     string `json:"description"`
-	Subject         string `json:"subject"`
-	Body            string `json:"body"`
-	Status          string `json:"status"`
-	Error           string `json:"error,omitempty"`
-	GenerationError string `json:"generationError,omitempty"`
-	SentAt          string `json:"sentAt,omitempty"`
-	MessageID       string `json:"messageId,omitempty"`
-	Source          string `json:"source,omitempty"`
+	Company         string            `json:"company"`
+	Email           string            `json:"email"`
+	Website         string            `json:"website"`
+	City            string            `json:"city"`
+	Industry        string            `json:"industry"`
+	Description     string            `json:"description"`
+	Subject         string            `json:"subject"`
+	Body            string            `json:"body"`
+	Status          string            `json:"status"`
+	Error           string            `json:"error,omitempty"`
+	GenerationError string            `json:"generationError,omitempty"`
+	SentAt          string            `json:"sentAt,omitempty"`
+	MessageID       string            `json:"messageId,omitempty"`
+	Source          string            `json:"source,omitempty"`
+	SendHistory     []DeliveryRecord  `json:"sendHistory,omitempty"`
+	Resend          *ResendPermission `json:"resend,omitempty"`
+}
+
+type DeliveryRecord struct {
+	SentAt     string   `json:"sentAt"`
+	MessageID  string   `json:"messageId,omitempty"`
+	Recipients []string `json:"recipients"`
+}
+
+// A restore applies only to this recipient and this known previous delivery.
+type ResendPermission struct {
+	Email  string `json:"email"`
+	SentAt string `json:"sentAt"`
+}
+
+func (l *Lead) rememberDelivery() {
+	record := DeliveryRecord{SentAt: l.SentAt, MessageID: l.MessageID, Recipients: append([]string(nil), recipients(*l)...)}
+	l.SendHistory = mergeSendHistory(l.SendHistory, []DeliveryRecord{record})
+}
+
+func mergeSendHistory(existing, incoming []DeliveryRecord) []DeliveryRecord {
+	out := append([]DeliveryRecord(nil), existing...)
+	for _, record := range incoming {
+		found := false
+		for _, previous := range out {
+			if previous.SentAt == record.SentAt && previous.MessageID == record.MessageID && strings.Join(previous.Recipients, "\n") == strings.Join(record.Recipients, "\n") {
+				found = true
+				break
+			}
+		}
+		if !found {
+			out = append(out, record)
+		}
+	}
+	return out
 }
 
 type Template struct {
@@ -225,8 +261,11 @@ func openApp(dir string) (*App, error) {
 			l.Status = "unknown"
 			l.Error = "Приложение закрылось во время отправки. Проверьте доставку у провайдера перед повтором."
 		}
+		if l.Status == "sent" {
+			l.rememberDelivery()
+		}
 		if l.Status == "sent" && l.Kind != "message" {
-			a.w.Sent[emailKey(l.Email)] = l.SentAt
+			a.mergeSent(l.Email, l.SentAt)
 		}
 	}
 	if err := a.save(); err != nil {
@@ -275,6 +314,27 @@ func identity(l Lead) string {
 }
 func editable(l Lead) bool   { return l.Status != "sent" && l.Status != "sending" }
 func selectable(l Lead) bool { return editable(l) && l.Status != "unknown" && validRecipients(l) }
+
+func (a *App) alreadySent(l Lead) bool {
+	if l.Kind == "message" {
+		return false
+	}
+	at, exists := a.w.Sent[emailKey(l.Email)]
+	return exists && (l.Resend == nil || emailKey(l.Resend.Email) != emailKey(l.Email) || l.Resend.SentAt != at)
+}
+
+func (a *App) mergeSent(email, at string) {
+	key := emailKey(email)
+	previous, exists := a.w.Sent[key]
+	if exists {
+		oldTime, oldErr := time.Parse(time.RFC3339Nano, previous)
+		newTime, newErr := time.Parse(time.RFC3339Nano, at)
+		if oldErr == nil && (newErr != nil || !newTime.After(oldTime)) {
+			return
+		}
+	}
+	a.w.Sent[key] = at
+}
 
 func csvLeads(r io.Reader) ([]Lead, error) {
 	b, err := io.ReadAll(io.LimitReader(r, 20*1024*1024+1))
@@ -361,7 +421,7 @@ func csvLeads(r io.Reader) ([]Lead, error) {
 func (a *App) merge(leads []Lead, sent map[string]string) (added, skipped int) {
 	for email, at := range sent {
 		if validEmail(email) {
-			a.w.Sent[emailKey(email)] = at
+			a.mergeSent(email, at)
 		}
 	}
 	known := map[string]int{}
@@ -375,11 +435,23 @@ func (a *App) merge(leads []Lead, sent map[string]string) (added, skipped int) {
 			l.Status = "unknown"
 			l.Error = "Перенесено во время отправки. Проверьте доставку перед повтором."
 		}
+		if l.Status == "sent" {
+			l.rememberDelivery()
+		}
 		if l.Status == "sent" && l.Kind != "message" {
-			a.w.Sent[emailKey(l.Email)] = l.SentAt
+			a.mergeSent(l.Email, l.SentAt)
 		}
 		if i, ok := known[identity(l)]; ok {
 			skipped++
+			if a.w.Leads[i].Status == "sent" {
+				a.w.Leads[i].rememberDelivery()
+			}
+			current := a.w.Leads[i]
+			a.w.Leads[i].SendHistory = mergeSendHistory(current.SendHistory, l.SendHistory)
+			// Reimporting the old sent copy must not undo an explicit restore.
+			if l.Status == "sent" && current.Resend != nil && !a.alreadySent(current) && (l.Kind != "message" || l.SentAt == current.Resend.SentAt) {
+				continue
+			}
 			// A fresh CSV can add missing company context without replacing drafts.
 			if l.Kind != "message" && a.w.Leads[i].Status != "sent" {
 				if l.Description != "" {
@@ -395,8 +467,13 @@ func (a *App) merge(leads []Lead, sent map[string]string) (added, skipped int) {
 					a.w.Leads[i].Industry = l.Industry
 				}
 			}
-			if a.w.Leads[i].Status != "sent" && (a.w.Leads[i].Status != "unknown" || l.Status == "sent") && (l.Status == "sent" || l.Kind == "message" || l.Subject != "" || l.Body != "" || len(l.Attachments) > 0) {
+			importedRestore := current.Status == "sent" && l.Status == "pending" && l.Resend != nil && !a.alreadySent(l) && (l.Kind == "message" || l.Resend.SentAt == current.SentAt)
+			incomingTime, incomingErr := time.Parse(time.RFC3339Nano, l.SentAt)
+			currentTime, currentErr := time.Parse(time.RFC3339Nano, current.SentAt)
+			newerSent := current.Status == "sent" && l.Status == "sent" && incomingErr == nil && (currentErr != nil || incomingTime.After(currentTime))
+			if (current.Status != "sent" || importedRestore || newerSent) && (current.Status != "unknown" || l.Status == "sent") && (l.Status == "sent" || l.Kind == "message" || l.Subject != "" || l.Body != "" || len(l.Attachments) > 0) {
 				l.ID = a.w.Leads[i].ID
+				l.SendHistory = mergeSendHistory(current.SendHistory, l.SendHistory)
 				a.w.Leads[i] = l
 			}
 			continue
@@ -417,10 +494,11 @@ func (a *App) merge(leads []Lead, sent map[string]string) (added, skipped int) {
 		if l.Kind == "message" {
 			continue
 		}
-		if at, ok := a.w.Sent[emailKey(l.Email)]; ok {
+		if a.alreadySent(*l) {
 			l.Status = "sent"
-			l.SentAt = at
+			l.SentAt = a.w.Sent[emailKey(l.Email)]
 			l.Error = ""
+			l.Resend = nil
 		}
 	}
 	return

@@ -3,14 +3,14 @@ const $ = (s, root = document) => root.querySelector(s);
 const $$ = (s, root = document) => [...root.querySelectorAll(s)];
 const escapeHTML = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 let state, selected = new Set(), activeID = null, filter = 'all', page = 'campaign';
-let editorDirty = false, formDirty = false, sendingRequest = false, uploading = false;
+let editorDirty = false, formDirty = false, sendingRequest = false, uploading = false, restoring = false;
 let currentToken = '', confirmStage = 0, pollTimer, toastTimer, composeFiles = [];
 const validEmail = email => /^[^\s@<>,;]+@[^\s@<>,;]+\.[^\s@<>,;]+$/.test(email || '');
 const addresses = lead => lead.kind === 'message' ? lead.recipients || [] : [lead.email];
 const recipientText = lead => addresses(lead).join(', ');
 const validDestination = lead => addresses(lead).length > 0 && addresses(lead).every(validEmail);
 const selectable = lead => !['sent','sending','unknown'].includes(lead.status) && validDestination(lead);
-const busy = () => !!(state?.sending || state?.generating || uploading);
+const busy = () => !!(state?.sending || state?.generating || uploading || restoring);
 const leadByID = id => state?.project.leads.find(l => l.id === id);
 const selectedLeads = () => [...selected].map(leadByID).filter(Boolean);
 const statusText = l => ({sent:'Отправлено',error:'Ошибка',unknown:'Проверьте доставку',sending:'Отправляется'}[l.status] || (l.generationError ? 'Ошибка генерации' : !validDestination(l) ? 'Нет адреса' : l.subject && l.body ? 'Черновик готов' : 'Не отправлено'));
@@ -48,6 +48,7 @@ function renderControls() {
   $('#send-button').disabled = !selected.size || busy() || editorDirty || sendingRequest;
   $('#bulk-attach-button').disabled = !selected.size || busy() || editorDirty;
   $$('.editor .attachment-mutation').forEach(button => button.disabled = editorDirty || busy());
+  $$('[data-restore]').forEach(button => button.disabled = editorDirty || busy());
   $$('#compose-form button').forEach(button => button.disabled = busy());
   $('#stop-button').hidden = !state?.sending && !state?.generating;
 }
@@ -64,6 +65,7 @@ function renderList() {
       <div class="row-content"><div class="row-top"><span class="company-name">${escapeHTML(l.company)}</span><span class="status-chip ${escapeHTML(l.status)} ${l.generationError ? 'error' : l.subject && l.body && l.status === 'pending' ? 'ready' : ''}">${statusText(l)}</span></div>
       <div class="company-email">${escapeHTML(recipientText(l) || 'Добавьте email в редакторе →')}</div>
       <div class="company-meta">${l.status === 'sending' ? '<span class="spinner"></span>' : ''}${escapeHTML(l.kind === 'message' ? `Обычное письмо · ${addresses(l).length} получ.` : [l.city,l.industry].filter(Boolean).join(' · ') || 'Компания')}${l.source ? `<span class="mini-source">${sourceText(l)}</span>` : ''}${l.attachments?.length ? `<span class="mini-source">⌕ ${l.attachments.length}</span>` : ''}</div></div>
+      ${l.status === 'sent' ? `<button type="button" class="row-restore" data-restore="${escapeHTML(l.id)}" title="Вернуть в черновики для повторной отправки" aria-label="Вернуть в черновики: ${escapeHTML(l.company)}" ${busy() || editorDirty ? 'disabled' : ''}><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 10a9 9 0 1 1 2.6 8.4M3 4v6h6"/></svg></button>` : ''}
     </div>`).join('') : `<div class="empty-list"><strong>${leads.length ? 'Здесь пока пусто' : 'Начните с первого письма'}</strong>${leads.length ? 'Попробуйте другой фильтр или поиск.' : 'Напишите письмо или загрузите CSV компаний.<br>Данные останутся на этом компьютере.'}</div>`;
   const selectableVisible = visible.filter(selectable), selectedVisible = selectableVisible.filter(l => selected.has(l.id));
   $('#select-all').checked = selectableVisible.length > 0 && selectedVisible.length === selectableVisible.length;
@@ -77,13 +79,17 @@ function renderList() {
   const summary=g?.completed ? `Последняя подготовка: ${g.completed} из ${g.total}. DeepSeek: ${g.personalized}; шаблон без описания: ${g.templates}; ошибки: ${g.failed}.${g.failed ? ' Предыдущий текст сохранён. '+g.error : ''}` : '';
   const banner = $('#job-banner'); banner.hidden = !busy() && !state.jobError && !summary;
   banner.className = 'banner' + (state.jobError || !busy() && g?.failed ? ' error' : '');
-  banner.textContent = state.jobError || (uploading ? 'Сохраняем вложения…' : state.sending ? 'Отправляем выбранные письма. Не закрывайте приложение до завершения.' : state.generating ? 'Готовим индивидуальные письма по описаниям компаний. Шаблон используется только без описания.' : summary);
+  banner.textContent = state.jobError || (restoring ? 'Возвращаем письмо в черновики…' : uploading ? 'Сохраняем вложения…' : state.sending ? 'Отправляем выбранные письма. Не закрывайте приложение до завершения.' : state.generating ? 'Готовим индивидуальные письма по описаниям компаний. Шаблон используется только без описания.' : summary);
   renderControls();
 }
 function attachmentHTML(lead, locked) {
   return `<div class="attachment-section"><div class="attachment-heading"><h2>Вложения ${lead.attachments?.length ? `· ${lead.attachments.length}` : ''}</h2>${!locked ? '<button type="button" id="editor-attach-button" class="button secondary attachment-mutation">＋ Прикрепить</button><input type="file" id="editor-attachment-input" multiple hidden>' : ''}</div>
     <div class="attachment-list">${(lead.attachments || []).map(f => `<div class="attachment-item"><span class="attachment-icon">▧</span><a class="attachment-name" href="/api/attachment?leadId=${encodeURIComponent(lead.id)}&id=${encodeURIComponent(f.id)}&name=${encodeURIComponent(f.name)}" download>${escapeHTML(f.name)}<small>${sizeText(f.size)}</small></a>${!locked ? `<button type="button" class="attachment-remove attachment-mutation" data-remove-attachment="${escapeHTML(f.id)}" data-filename="${escapeHTML(f.name)}" aria-label="Удалить ${escapeHTML(f.name)}">×</button>` : ''}</div>`).join('') || '<p class="field-hint">Файлы не прикреплены.</p>'}</div>
     ${!locked ? '<p class="field-hint">До 10 МБ на файл, 15 МБ на письмо. Вложения сохраняются сразу.</p>' : ''}</div>`;
+}
+function deliveryHistoryHTML(lead) {
+  if (!lead.sendHistory?.length) return '';
+  return `<details class="delivery-history"><summary>История отправок · ${lead.sendHistory.length}</summary><ul>${lead.sendHistory.map(record => `<li><strong>${escapeHTML(record.sentAt ? new Date(record.sentAt).toLocaleString('ru-RU') : 'Дата не указана')}</strong><span>${escapeHTML((record.recipients || []).join(', '))}</span>${record.messageId ? `<code>${escapeHTML(record.messageId)}</code>` : ''}</li>`).join('')}</ul></details>`;
 }
 function renderEditor() {
   const lead = leadByID(activeID); if (!lead) return;
@@ -97,11 +103,13 @@ function renderEditor() {
       ${manual ? '<p class="field-hint">Адреса через запятую или точку с запятой. Все получатели видят список «Кому».</p>' : ''}
       ${!validDestination(lead) ? '<div class="inline-note">Исправьте адрес, чтобы выбрать письмо для отправки.</div>' : ''}
       ${lead.error ? `<div class="inline-error">${escapeHTML(lead.error)}</div>` : ''}${lead.generationError ? `<div class="inline-error">Генерация не выполнена. Предыдущий текст не изменён: ${escapeHTML(lead.generationError)}</div>` : ''}
+      ${lead.resend ? '<div class="inline-note">Возвращено для повторной отправки. Можно изменить или подготовить письмо заново, затем выбрать его вместе с другими. Отправка потребует двух подтверждений.</div>' : ''}
       ${!manual ? `<div class="field-hint">${lead.source==='deepseek' ? 'Текст получен от DeepSeek на основе описания компании.' : lead.source==='manual' ? 'Текст отредактирован вручную.' : lead.source==='template' ? 'Использован шаблон: при подготовке описание отсутствовало. Добавьте описание ниже и запустите генерацию заново.' : lead.description?.trim() ? 'При подготовке DeepSeek получит описание этой компании и ваше задание.' : 'Описание не заполнено — будет использован шаблон по умолчанию.'}</div>` : ''}
       <label>Тема<input name="subject" value="${escapeHTML(lead.subject)}" placeholder="Тема письма" maxlength="1000" ${locked ? 'disabled' : ''}></label>
       <label>Письмо<textarea name="body" rows="7" maxlength="50000" placeholder="Напишите сообщение или подготовьте черновик" ${locked ? 'disabled' : ''}>${escapeHTML(lead.body)}</textarea></label>
       <div class="editor-footer"><span id="editor-save-status">${lead.status === 'sent' ? `Принято SMTP · ${escapeHTML(time)}` : 'Изменения сохраняются кнопкой справа'}</span><button class="button secondary" type="submit" ${locked ? 'disabled' : ''}>Сохранить письмо</button></div>
       ${attachmentHTML(lead, locked)}
+      ${deliveryHistoryHTML(lead)}
       ${lead.status === 'unknown' ? '<div class="inline-note">Проверьте доставку у провайдера. Только если письмо точно не принято, разрешите повтор.</div><button type="button" id="resolve-button" class="button danger">Проверил: письмо не принято</button>' : ''}
       ${manual ? '' : `<details class="description"><summary>Описание компании ${lead.description ? '' : '· отсутствует'}</summary><label>Контекст для DeepSeek<textarea name="description" rows="4" maxlength="50000" ${locked ? 'disabled' : ''} placeholder="Чем занимается компания, какие продукты выпускает…">${escapeHTML(lead.description)}</textarea></label></details>`}
       ${lead.messageId ? `<div class="field-hint message-id">Message-ID: ${escapeHTML(lead.messageId)}</div>` : ''}
@@ -202,6 +210,22 @@ $$('.tab').forEach(el=>el.addEventListener('click',()=>{filter=el.dataset.filter
 $('#search').addEventListener('input',renderList);
 $('#select-all').addEventListener('change',e=>{for (const l of visibleLeads().filter(selectable)){if(e.target.checked)selected.add(l.id);else selected.delete(l.id);}renderList();});
 $('#lead-list').addEventListener('click',e=>{
+  const restore=e.target.closest('[data-restore]');
+  if(restore){
+    e.stopPropagation();
+    if(restore.disabled || busy() || editorDirty)return;
+    action(async()=>{
+      restoring=true;renderList();
+      try{
+        await request('restore',{id:restore.dataset.restore});
+        selected.delete(restore.dataset.restore);activeID=restore.dataset.restore;
+        if(filter==='sent'){filter='pending';$$('.tab').forEach(tab=>tab.classList.toggle('active',tab.dataset.filter===filter));}
+        await refresh(true);
+        toast('Письмо возвращено в черновики. Выберите его для повторной отправки или подготовки.');
+      }finally{restoring=false;renderList();renderEditor();}
+    });
+    return;
+  }
   const checkbox=e.target.closest('[data-check]');
   if(checkbox){e.stopPropagation();if(checkbox.disabled)return;if(checkbox.checked)selected.add(checkbox.dataset.check);else selected.delete(checkbox.dataset.check);renderList();return;}
   const row=e.target.closest('[data-id]');if(!row)return;

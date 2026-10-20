@@ -302,7 +302,9 @@ func (a *App) updateLead(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 			}
-			if _, ok := a.w.Sent[emailKey(in.Email)]; ok && l.Kind != "message" {
+			candidate := l
+			candidate.Email = strings.TrimSpace(in.Email)
+			if a.alreadySent(candidate) {
 				fail(w, 409, errors.New("на этот адрес уже отправлено письмо"))
 				return
 			}
@@ -364,6 +366,52 @@ func (a *App) resolve(w http.ResponseWriter, r *http.Request) {
 	fail(w, 400, errors.New("нет неопределённой отправки"))
 }
 
+func (a *App) restore(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		ID string `json:"id"`
+	}
+	if !decode(w, r, &in) {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.sending || a.generating {
+		fail(w, 409, errors.New("дождитесь завершения текущей операции"))
+		return
+	}
+	for i, l := range a.w.Leads {
+		if l.ID != in.ID {
+			continue
+		}
+		if l.Status != "sent" {
+			fail(w, 409, errors.New("вернуть в черновики можно только отправленное письмо"))
+			return
+		}
+		if err := a.commit(func() {
+			p := &a.w.Leads[i]
+			p.rememberDelivery()
+			at := p.SentAt
+			if p.Kind != "message" {
+				if previous, exists := a.w.Sent[emailKey(p.Email)]; exists {
+					at = previous
+				} else {
+					a.w.Sent[emailKey(p.Email)] = at
+				}
+			}
+			p.Resend = &ResendPermission{Email: emailKey(p.Email), SentAt: at}
+			p.Status, p.Error, p.GenerationError = "pending", "", ""
+			p.SentAt, p.MessageID = "", ""
+		}); err != nil {
+			fail(w, 500, err)
+			return
+		}
+		a.confirmation = nil
+		respond(w, map[string]bool{"ok": true})
+		return
+	}
+	fail(w, 404, errors.New("письмо не найдено"))
+}
+
 func (a *App) findSelected(ids []string, drafts bool) ([]Lead, error) {
 	if len(ids) == 0 || len(ids) > 10000 {
 		return nil, errors.New("выберите хотя бы одну компанию")
@@ -383,7 +431,7 @@ func (a *App) findSelected(ids []string, drafts bool) ([]Lead, error) {
 		if !selectable(l) {
 			return nil, fmt.Errorf("%s: адрес отсутствует, письмо отправлено или требует проверки", l.Company)
 		}
-		if _, ok := a.w.Sent[emailKey(l.Email)]; ok && l.Kind != "message" {
+		if a.alreadySent(l) {
 			return nil, errors.New("на выбранный адрес уже отправлено письмо")
 		}
 		if drafts && (l.Subject == "" || l.Body == "" || strings.ContainsAny(l.Subject, "\r\n")) {
@@ -633,7 +681,9 @@ func (a *App) runSend(s Settings, leads []Lead) {
 				p.Error = cleanError(err, s)
 				if err == nil {
 					p.Status = "sent"
-					p.SentAt = time.Now().UTC().Format(time.RFC3339)
+					p.SentAt = time.Now().UTC().Format(time.RFC3339Nano)
+					p.rememberDelivery()
+					p.Resend = nil
 					if p.Kind != "message" {
 						a.w.Sent[emailKey(p.Email)] = p.SentAt
 					}
@@ -678,6 +728,7 @@ func (a *App) routes() *http.ServeMux {
 	m.HandleFunc("POST /api/attachments/remove", a.removeAttachment)
 	m.HandleFunc("GET /api/attachment", a.downloadAttachment)
 	m.HandleFunc("POST /api/resolve", a.resolve)
+	m.HandleFunc("POST /api/restore", a.restore)
 	m.HandleFunc("POST /api/generate", a.generateDrafts)
 	m.HandleFunc("POST /api/prepare", a.prepare)
 	m.HandleFunc("POST /api/confirm", func(w http.ResponseWriter, r *http.Request) { a.confirmationStep(w, r, 1) })

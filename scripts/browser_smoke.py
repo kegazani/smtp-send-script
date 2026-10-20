@@ -259,6 +259,65 @@ def main():
                 attached=list(mail.iter_attachments())
                 assert len(attached)==2 and attached[1].get_filename()=='описание.txt'
                 assert attached[1].get_payload(decode=True)==notes
+
+                # Restore a sent company using the right-hand arrow, regenerate
+                # it, then send it in the same batch as a newly composed draft.
+                page.locator('[data-filter="sent"]').click()
+                expect(page.locator('[data-restore]')).to_have_count(2)
+                page.get_by_role('button',name='Вернуть в черновики: Тестовая компания',exact=True).click()
+                expect(page.locator('[data-filter="pending"]')).to_have_class('tab active')
+                expect(page.locator('#stat-sent')).to_have_text('1')
+                company=page.locator('.lead-row').filter(has=page.locator('.company-name',has_text='Тестовая компания'))
+                expect(company.locator('input')).to_be_enabled()
+                expect(company.locator('input')).not_to_be_checked()
+                expect(page.locator('#preview-panel .inline-note')).to_contain_text('Возвращено для повторной отправки')
+                expect(page.locator('.delivery-history summary')).to_have_text('История отправок · 1')
+                expect(page.locator('.attachment-item')).to_have_count(1)
+                assert len(server.messages)==2
+                page.locator('details.description > summary').click()
+                page.locator('#editor-form [name="description"]').fill('')
+                page.get_by_role('button',name='Сохранить письмо',exact=True).click()
+                expect(page.locator('#toast')).to_have_text('Письмо сохранено')
+                page.locator('[data-page="template"]').click()
+                page.locator('#template-form [name="subject"]').fill('Повторный вопрос для {company}')
+                page.locator('#template-form [name="body"]').fill('Повторное предложение для {company}.')
+                page.get_by_role('button',name='Сохранить шаблон').click()
+                expect(page.locator('#toast')).to_have_text('Шаблон сохранён')
+                page.locator('[data-page="campaign"]').click()
+                company.locator('input').check()
+                page.once('dialog',lambda dialog:dialog.accept())
+                page.locator('#generate-button').click()
+                expect(page.locator('#editor-form [name="body"]')).to_have_value('Повторное предложение для Тестовая компания.',timeout=10000)
+                page.reload()
+                expect(page.locator('#stat-sent')).to_have_text('1')
+                expect(company.locator('input')).to_be_enabled()
+                page.locator('[data-page="compose"]').click()
+                page.locator('#compose-form [name="recipients"]').fill(RECIPIENT)
+                page.locator('#compose-form [name="subject"]').fill('Новое письмо в общей пачке')
+                page.locator('#compose-form [name="body"]').fill('Новый черновик рядом с повторным письмом.')
+                page.get_by_role('button',name='Сохранить черновик',exact=True).click()
+                expect(page.locator('#stat-total')).to_have_text('4')
+                page.locator('#select-all').check()
+                expect(page.locator('#selected-count')).to_have_text('2')
+                expect(page.locator('.lead-row.sent input')).to_be_disabled()
+                send_with_confirmations()
+                expect(page.locator('#stat-sent')).to_have_text('3',timeout=10000)
+                expect(page.locator('#import-button')).to_be_enabled(timeout=10000)
+                assert len(server.messages)==4
+                batch=[BytesParser(policy=policy.default).parsebytes(message) for message in server.messages[2:]]
+                assert {str(message['Subject']) for message in batch}=={'Повторный вопрос для Тестовая компания','Новое письмо в общей пачке'}
+                resent=next(message for message in batch if str(message['Subject'])=='Повторный вопрос для Тестовая компания')
+                original=BytesParser(policy=policy.default).parsebytes(server.messages[0])
+                assert resent['Message-ID']!=original['Message-ID']
+                resent_body=resent.get_body().get_content().strip()
+                assert resent_body=='Повторное предложение для Тестовая компания.',repr(resent_body)
+                assert list(resent.iter_attachments())[0].get_payload(decode=True)==brochure
+                company.click()
+                expect(page.locator('.delivery-history summary')).to_have_text('История отправок · 2')
+                page.locator('.delivery-history summary').click()
+                expect(page.locator('.delivery-history li')).to_have_count(2)
+                if screenshot_dir:
+                    page.screenshot(path=str(screenshot_path/'restored-message-history.png'),full_page=True)
                 with page.expect_download() as download:
                     page.locator('#export-menu-button').click()
                     page.get_by_text('Проект с вложениями · JSON').click()
@@ -268,14 +327,16 @@ def main():
                 assert exported['version']==2 and len(exported['files'])==2
                 assert exported['template']['senderProfile']=='Тестовая команда обслуживает вентиляционное оборудование.'
                 assert len(exported['leads'][2]['attachments'])==2
+                assert len(exported['leads'][0]['sendHistory'])==2 and not exported['leads'][0].get('resend')
                 assert 'test-only-password' not in export_file.read_text()
                 page.reload()
-                expect(page.locator('#stat-sent')).to_have_text('2')
+                expect(page.locator('#stat-sent')).to_have_text('3')
                 page.locator('#file-input').set_input_files(export_file)
                 expect(page.locator('#toast')).to_contain_text('Добавлено: 0')
-                expect(page.locator('#stat-sent')).to_have_text('2')
+                expect(page.locator('#stat-sent')).to_have_text('3')
                 page.set_viewport_size({'width':390,'height':844})
                 assert not page.evaluate('document.documentElement.scrollWidth > innerWidth')
+                assert page.locator('[data-restore]').first.bounding_box()['width']>=40
                 page.locator('[data-page="compose"]').click()
                 page.locator('#compose-form [name="recipients"]').fill(RECIPIENT)
                 page.locator('#compose-form [name="subject"]').fill('Следующее письмо')
@@ -286,7 +347,7 @@ def main():
                     page.screenshot(path=str(screenshot_path/'compose-mobile.png'),full_page=True)
                 assert not errors, errors
                 browser.close()
-            print('PASS: password autofill without input events, unsaved navigation guard, draft SMTP auth without saving, wrong draft password rejection, blank-secret saves, credential persistence across server restart, saved-password hint, TLS SMTP auth, CSV, template, bulk/company attachments, MIME bytes, manual compose, multiple recipients, test guard, attachment add/remove/download, both confirmations, rejection/retry/sent colors, filters, JSON file transfer, desktop/mobile. Two messages accepted by local fixture; no external SMTP traffic.')
+            print('PASS: password autofill without input events, unsaved navigation guard, draft SMTP auth without saving, wrong draft password rejection, blank-secret saves, credential persistence across server restart, saved-password hint, TLS SMTP auth, CSV, template, bulk/company attachments, MIME bytes, manual compose, multiple recipients, test guard, attachment add/remove/download, sent restore arrow, restored draft regeneration and persistence, batch of restored and new drafts, fresh Message-ID, delivery history, both confirmations, rejection/retry/sent colors, filters, JSON file transfer, desktop/mobile. Four messages accepted by local fixture; no external SMTP traffic.')
         finally:
             process.terminate();process.wait(timeout=10);server.shutdown();server.server_close()
 
